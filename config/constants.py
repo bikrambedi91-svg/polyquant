@@ -115,8 +115,9 @@ MAX_HOLD_SECONDS: int = 600  # 10 minutes
 
 # ── Trailing SL (Breakeven Trigger) ──
 # When unrealized profit reaches this fraction of TP target, move SL to entry price.
-# E.g., 0.50 = when price moves 50% of the way to TP, SL snaps to breakeven.
-TRAILING_SL_TRIGGER: float = 0.50
+# Raised from 0.50 to 0.75: 50% was too aggressive, caused whipsaw exits.
+# BTC #2 would have hit TP (+$2.5) but trailing SL caused -$7.1 loss.
+TRAILING_SL_TRIGGER: float = 0.75
 
 # ── SL Slippage Simulation ──
 # In paper mode, simulate taker slippage on SL exits.

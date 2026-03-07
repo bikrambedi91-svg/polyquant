@@ -660,7 +660,7 @@ class TradingPipeline:
                     action=action,
                     yes_price=round(yes_price, 3),
                     min_required=MIN_YES_FOR_BUY_NO,
-                    reason="BUY_NO needs bullish market (YES>=0.60) for contrarian edge",
+                    reason=f"BUY_NO needs bullish market (YES>={MIN_YES_FOR_BUY_NO}) for contrarian edge",
                 )
                 if self._dlog:
                     self._dlog.log_filter(asset, "yes_price", False,
@@ -676,7 +676,7 @@ class TradingPipeline:
                     action=action,
                     yes_price=round(yes_price, 3),
                     max_allowed=MAX_YES_FOR_BUY_YES,
-                    reason="BUY_YES needs bearish market (YES<=0.40) for contrarian edge",
+                    reason=f"BUY_YES needs bearish market (YES<={MAX_YES_FOR_BUY_YES}) for contrarian edge",
                 )
                 if self._dlog:
                     self._dlog.log_filter(asset, "yes_price", False,
