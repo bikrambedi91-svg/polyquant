@@ -545,16 +545,17 @@ class TradingPipeline:
             total_markets=len(markets),
         )
 
-        # ── Edge thresholds (raised from 8% → 12% for higher WR) ──
-        # Higher bar = fewer but higher-quality trades, targeting 85%+ WR.
-        edge_threshold = 0.12
+        # ── Edge thresholds ──
+        # Base 10% edge (lowered from 12% to increase trade volume while
+        # still ensuring profitability after fees). Quality gated by model
+        # agreement + contrarian price filters.
+        edge_threshold = 0.10
         if regime in ("CHOPPY", "RISK_OFF"):
-            edge_threshold = 0.14
+            edge_threshold = 0.12
 
-        # BUY_YES premium: model's bullish predictions are systematically
-        # overconfident (14% WR vs 100% for BUY_NO across 12 trades).
-        # Require stronger edge for BUY_YES to compensate.
-        BUY_YES_EDGE_PREMIUM = 0.03  # +3% extra edge required (total 15%)
+        # BUY_YES premium: model's bullish predictions have been less
+        # reliable historically. Require modest extra edge for BUY_YES.
+        BUY_YES_EDGE_PREMIUM = 0.02  # +2% extra edge required (total 12%)
 
         for ens_result in ensemble_results:
             asset = ens_result["asset"]
@@ -571,10 +572,11 @@ class TradingPipeline:
             yes_price = getattr(market, "current_yes_price", 0.5)
 
             # ── Asset exclusion (data-driven) ──
-            # ETH: 0W/5L, -$10.81 across 22 trades. Every single ETH trade lost.
-            # Model's bearish predictions for ETH are consistently wrong.
-            # Excluded until model calibration improves.
-            _EXCLUDED_ASSETS = {"ETH"}
+            # ETH previously excluded (0W/5L on old models). Re-enabled with
+            # tighter edge requirement (+2%) to validate current model performance.
+            # Will re-exclude if WR < 40% after 20+ trades.
+            _EXCLUDED_ASSETS = set()  # Empty — all assets enabled
+            _TIGHTER_EDGE_ASSETS = {"ETH"}  # Assets requiring extra edge
             if asset in _EXCLUDED_ASSETS:
                 logger.info("edge_skip_excluded_asset", asset=asset)
                 if self._dlog:
@@ -583,14 +585,12 @@ class TradingPipeline:
                                           {"excluded_assets": list(_EXCLUDED_ASSETS)})
                 continue
 
-            # ── Minimum confidence 52 for all assets ──
-            # Lowered from 55→52: BTC/XRP perpetually at 53 due to neutral model
-            # variance (VolSurf=0.50, Sentiment=0.50 cause agreement penalty).
-            # Ensemble conf is structurally depressed when only 2-3 models produce
-            # directional signals. Model agreement filter (2+ models must agree)
-            # + directional alignment + 12% edge threshold handle quality gating.
-            # At 55, BTC/XRP were blocked 100% of the time (7/7 and 1/1 on 15m).
-            MIN_CONFIDENCE = 52
+            # ── Minimum confidence 50 for all assets ──
+            # Lowered from 52→50: Ensemble conf is structurally depressed when
+            # neutral models (VolSurf=0.50, Sentiment=0.50) cause agreement penalty.
+            # Quality gated by: model agreement (2+ directional models),
+            # contrarian price filter, and 10% edge threshold.
+            MIN_CONFIDENCE = 50
             if ensemble.confidence < MIN_CONFIDENCE:
                 logger.info("edge_skip_low_confidence", asset=asset, confidence=ensemble.confidence, min_conf=MIN_CONFIDENCE, prob_up=round(ensemble.prob_up, 3))
                 if self._dlog:
@@ -646,15 +646,13 @@ class TradingPipeline:
                 edge = (1.0 - ensemble.prob_up) - effective_no
                 action = "BUY_NO"
 
-            # ── Directional alignment check (raised from 0.55 to 0.60) ──
-            # Data from 18 v3 trades:
-            #   YES > 0.65:   6W/1L = 86% WR
-            #   YES 0.60-0.65: 4W/1L = 80% WR
-            #   YES 0.55-0.60: 3W/3L = 50% WR (coin flip, barely profitable)
-            # Raising to 0.60 eliminates the 50% WR bucket → expected 83% WR.
-            # Symmetric: BUY_YES requires YES <= 0.40 (mirror of 0.60).
-            MIN_YES_FOR_BUY_NO = 0.60
-            MAX_YES_FOR_BUY_YES = 0.40
+            # ── Directional alignment check (relaxed from 0.60 to 0.55) ──
+            # Data from 18 v3 trades shows YES 0.55-0.60 = 50% WR.
+            # At 50% WR with 10%+ edge, still profitable after fees.
+            # Relaxing to generate more paper trades for learning engine data.
+            # Will tighten back to 0.60 if WR drops below 55% after 50+ trades.
+            MIN_YES_FOR_BUY_NO = 0.55
+            MAX_YES_FOR_BUY_YES = 0.45
             if action == "BUY_NO" and yes_price < MIN_YES_FOR_BUY_NO:
                 logger.info(
                     "edge_skip_not_contrarian",
@@ -778,6 +776,9 @@ class TradingPipeline:
                 if action == "BUY_YES"
                 else edge_threshold
             )
+            # Tighter edge for historically weak assets (ETH)
+            if asset in _TIGHTER_EDGE_ASSETS:
+                effective_threshold += 0.02
 
             # Log the edge calculation result
             if self._dlog:
