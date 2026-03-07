@@ -11,14 +11,31 @@ from database.models import Trade
 logger = structlog.get_logger(__name__)
 
 
+def _sanitize_floats(kwargs: dict) -> dict:
+    """Convert numpy float types to Python float for PostgreSQL compatibility."""
+    import numpy as np
+    sanitized = {}
+    for k, v in kwargs.items():
+        if isinstance(v, (np.floating, np.integer)):
+            sanitized[k] = float(v)
+        else:
+            sanitized[k] = v
+    return sanitized
+
+
 def create_trade(session: Session, **kwargs) -> Trade:
     """Create a new trade record and commit.
 
     Required kwargs: trade_id, asset, timeframe, action, entry_price, size_usd
     """
+    kwargs = _sanitize_floats(kwargs)
     trade = Trade(**kwargs)
     session.add(trade)
-    session.commit()
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
     session.refresh(trade)
     logger.info("trade_created", trade_id=trade.trade_id, asset=trade.asset, action=trade.action)
     return trade
@@ -26,6 +43,7 @@ def create_trade(session: Session, **kwargs) -> Trade:
 
 def update_trade(session: Session, trade_id: str, **kwargs) -> Optional[Trade]:
     """Update a trade by trade_id. Returns the updated trade or None."""
+    kwargs = _sanitize_floats(kwargs)
     trade = session.query(Trade).filter(Trade.trade_id == trade_id).first()
     if trade is None:
         logger.warning("trade_not_found", trade_id=trade_id)
@@ -33,7 +51,11 @@ def update_trade(session: Session, trade_id: str, **kwargs) -> Optional[Trade]:
     for key, value in kwargs.items():
         if hasattr(trade, key):
             setattr(trade, key, value)
-    session.commit()
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
     session.refresh(trade)
     logger.info("trade_updated", trade_id=trade_id, fields=list(kwargs.keys()))
     return trade

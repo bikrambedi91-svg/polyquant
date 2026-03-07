@@ -951,6 +951,10 @@ class TradingPipeline:
             active = get_active_trades(self._engine._db)
         except Exception as exc:
             logger.error("monitor_db_error", error=str(exc))
+            try:
+                self._engine._db.rollback()
+            except Exception:
+                pass
             return {"monitored": [], "exits": []}
 
         if not active:
