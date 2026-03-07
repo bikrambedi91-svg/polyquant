@@ -85,5 +85,19 @@ class Settings(BaseSettings):
 
 
 def get_settings() -> Settings:
-    """Return a cached Settings instance."""
+    """Return a cached Settings instance.
+
+    On Streamlit Cloud, reads DB_URL from st.secrets if available.
+    """
+    import os
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and "DB_URL" in st.secrets:
+            os.environ["DB_URL"] = st.secrets["DB_URL"]
+        if hasattr(st, "secrets") and "MODE" in st.secrets:
+            os.environ["MODE"] = st.secrets["MODE"]
+        if hasattr(st, "secrets") and "BANKROLL_USDC" in st.secrets:
+            os.environ["BANKROLL_USDC"] = str(st.secrets["BANKROLL_USDC"])
+    except Exception:
+        pass
     return Settings()
