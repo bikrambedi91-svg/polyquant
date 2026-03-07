@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "streamlit", "run", "C:/polyquant/dashboard/app.py", "--server.headless", "true", "--server.port", "8502"],
+      "port": 8502
+    },
+    {
+      "name": "bot",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["scripts/run_bot.py"],
+      "port": 0
+    }
+  ]
+}
