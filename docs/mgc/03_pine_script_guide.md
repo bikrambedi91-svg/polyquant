@@ -1,5 +1,48 @@
 # MGC Playbook v2 — Pine Script Guide
 
+> **Which file do I use?** There are now two scripts in this folder.
+>
+> | File | Type | Use it when |
+> |---|---|---|
+> | `MGC_PBX_v2.pine` | **Strategy** (Strategy Tester) | You want the playbook executed and journaled: simulated bracket orders, TP1 partials, cancels, an honest trade list, plus the v2 rules below. **This is the recommended script.** |
+> | `MGC_PBX_v1_baseline.pine` | Strategy | The unmodified script `MGC_PBX_v2.pine` was built from, kept so every change is diffable. |
+> | `MGC_Playbook.pine` | Indicator | The earlier indicator-only implementation. Superseded; kept for reference. |
+>
+> ## MGC_PBX_v2 in two minutes
+>
+> 1. Chart: **COMEX:MGC1!**, **5 minutes**, and turn **back-adjustment on** (the "B-ADJ" toggle next to the symbol). The script warns with a red DATA row if the contract is unadjusted, because roll steps fake gaps and levels.
+> 2. Pine Editor → paste → Add to chart. Open the **Strategy Tester** tab for the trade list.
+> 3. Settings → group 5: set **Full risk per trade** (one R). Group 7: type today's extra release in **Extra release today** if there is one; 08:30 and 10:00 are blocked every day.
+> 4. Alerts → create one alert on the script with the condition **"Any alert() function call"**. Every LAST-line event (zone reached, sweep, shift, order, fill, exit, skip, cancel) is sent.
+> 5. Read the panel: **NOW** is one sentence in plain English, coloured yellow when an order or trade exists, blue when a setup is forming, grey when there is nothing to do, red when the day is stopped. Hover any zone, level or tag for the detail.
+>
+> ## What v2 adds to the baseline (all switchable in settings)
+>
+> | Playbook v2 rule | Where it lives |
+> |---|---|
+> | Setup C: IFVG flip retest (§9) | Group 4 `Setup C`. A failed 15m/30m zone that now agrees with the bias; first return, 5m close back beyond the midpoint; limit at the midpoint, stop beyond the far edge. |
+> | 10:00 news window + an extra release time (§5) | Group 7 `Treat 10:00 as a data release`, `Extra release today`. |
+> | A+-only windows: kill-zone tail, 11:00–11:30, afternoon (§5.2, rule 6) | Group 7 `A+ only`. Entries allowed there only when the setup grades A+. |
+> | ADR budget tiers: 80% no Setup B, 100% A+ only, 130% done (§13.3) | Group 5 `Range budget`. |
+> | Minimum stop distance 25 ticks (§3.5) | Group 4 `Minimum stop distance`. A tighter stop is widened. |
+> | TP1 one tick in front of the obstacle (§8.5) | Built in. |
+> | Weak sweep costs one confluence (§10) | Built in: a level reclaimed on a later candle than the one that took it. Shown as `weak-sweep(-1)` in the plus-points. |
+> | Contract ladder: 3+ contracts take a third at TP1 (§11) | Built in. 1 contract: all out or hold (group 6). 2: one off. |
+> | 1H against 4H → 1H direction at half risk, everything off at TP1 (§7.1) | Group 1 bias option `Auto: 1H, half risk when 4H disagrees`. |
+> | Neutral bias: A+ sweeps of PDH/PDL, Asia or London H/L at half risk (§7.1) | Group 1 `When the bias is not clear`. |
+> | Unfilled orders expire after 12 bars (§3.5) | Group 6 `Cancel an unfilled order after N bars`. |
+> | LBMA AM/PM fix and settlement marks (§5.1) | Group 8 `Mark the LBMA fixes`. |
+> | Alerts on every event | Group 8 `Send every LAST-line event`. |
+> | DEBUG row off by default | Group 8. |
+>
+> The baseline's own strengths are untouched: 15m/30m candles rebuilt from the 5m bars with a parity check, the pre-session bias snapshot, the §5.3 sweep-with-deadline rule, zone merging, the single label column, and the Strategy Tester bracket engine.
+>
+> ---
+>
+> *The sections below describe the earlier indicator, `MGC_Playbook.pine`.*
+
+
+
 File: `docs/mgc/MGC_Playbook.pine` · Pine Script v6 · overlay indicator.
 It implements `02_MGC_Playbook_v2.md` on a single 5-minute chart: the higher-timeframe gaps,
 their own-timeframe states, the liquidity map, the sweep → MSS → entry trigger, the room rule,
