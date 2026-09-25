@@ -47,7 +47,6 @@ gapMaxAge    = input.int(576,    "Drop HTF gaps older than N chart bars",       
 reqPD_A      = input.bool(true,  "Setup A POIs must sit in discount (longs) / premium (shorts)", group = grpGap)
 showIFVG     = input.bool(true,  "Keep failed gaps as IFVG zones (Setup C)",     group = grpGap)
 ifvgLife     = input.int(72,     "IFVG zone life (chart bars)",                  group = grpGap, minval = 12)
-show5m       = input.bool(true,  "Draw 5m gaps (faint)",                         group = grpGap)
 max5m        = input.int(24,     "Max 5m gaps kept",                             group = grpGap, minval = 6, maxval = 60)
 
 grpLiq       = "3 · Liquidity & sessions (ET)"
@@ -66,7 +65,6 @@ eqTolAtr     = input.float(0.10, "Equal highs/lows tolerance (× 5m ATR)",      
 pivMinor     = input.int(2,      "5m swing pivot length",                       group = grpLiq, minval = 1, maxval = 4)
 minorLook    = input.int(60,     "Minor swing liquidity lookback (bars)",       group = grpLiq, minval = 12)
 showMinor    = input.bool(false, "Mark minor 5m swing levels",                   group = grpLiq)
-showLBMA     = input.bool(true,  "Mark LBMA fixes (5:30 / 10:00 ET) and settlement (1:30)", group = grpLiq)
 
 grpTrig      = "4 · Trigger: sweep → MSS → entry (§3.4 / §9)"
 reclaimBars  = input.int(3,      "Sweep reclaim window (bars)",                 group = grpTrig, minval = 1, maxval = 6)
@@ -1054,15 +1052,15 @@ f_firstObstacle(int dir, float entry) =>
     string name = ""
     for g in gapsA
         if g.bull == (dir == -1) and g.state <= 1
-            float edge = dir == 1 ? g.bottom : g.top
-            if dir * (edge - entry) > 0 and (na(best) or dir * (edge - best) < 0)
-                best := edge
+            float edgeA = dir == 1 ? g.bottom : g.top
+            if dir * (edgeA - entry) > 0 and (na(best) or dir * (edgeA - best) < 0)
+                best := edgeA
                 name := g.tf + (dir == 1 ? " bear gap" : " bull gap")
     for g in gapsB
         if g.bull == (dir == -1) and g.state <= 1
-            float edge = dir == 1 ? g.bottom : g.top
-            if dir * (edge - entry) > 0 and (na(best) or dir * (edge - best) < 0)
-                best := edge
+            float edgeB = dir == 1 ? g.bottom : g.top
+            if dir * (edgeB - entry) > 0 and (na(best) or dir * (edgeB - best) < 0)
+                best := edgeB
                 name := g.tf + (dir == 1 ? " bear gap" : " bull gap")
     for L in levels
         if L.active and L.major and L.isHigh == (dir == 1)
@@ -1650,18 +1648,18 @@ f_nearestZoneTxt(int dir) =>
     float bestD = na
     for g in gapsA
         if g.bull == (dir == 1) and g.state <= 1
-            float edge = dir == 1 ? g.top : g.bottom
-            float d = math.abs(edge - close)
-            if na(bestD) or d < bestD
-                bestD := d
-                out := g.tf + " " + f_px(g.bottom) + "–" + f_px(g.top) + " · " + str.tostring(d, format.mintick) + (dir == 1 ? " below" : " above") + (g.state == 1 ? " · weakening" : "")
+            float edgeA = dir == 1 ? g.top : g.bottom
+            float dA = math.abs(edgeA - close)
+            if na(bestD) or dA < bestD
+                bestD := dA
+                out := g.tf + " " + f_px(g.bottom) + "–" + f_px(g.top) + " · " + str.tostring(dA, format.mintick) + (dir == 1 ? " below" : " above") + (g.state == 1 ? " · weakening" : "")
     for g in gapsB
         if g.bull == (dir == 1) and g.state <= 1
-            float edge = dir == 1 ? g.top : g.bottom
-            float d = math.abs(edge - close)
-            if na(bestD) or d < bestD
-                bestD := d
-                out := g.tf + " " + f_px(g.bottom) + "–" + f_px(g.top) + " · " + str.tostring(d, format.mintick) + (dir == 1 ? " below" : " above") + (g.state == 1 ? " · weakening" : "")
+            float edgeB = dir == 1 ? g.top : g.bottom
+            float dB = math.abs(edgeB - close)
+            if na(bestD) or dB < bestD
+                bestD := dB
+                out := g.tf + " " + f_px(g.bottom) + "–" + f_px(g.top) + " · " + str.tostring(dB, format.mintick) + (dir == 1 ? " below" : " above") + (g.state == 1 ? " · weakening" : "")
     out == "" ? "none on the chart yet" : out
 
 f_targetsTxt(int dir) =>
