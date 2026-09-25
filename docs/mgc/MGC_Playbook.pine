@@ -319,32 +319,6 @@ f_windowClass() =>
         cls := 0
     cls
 winClass = f_windowClass()
-f_windowName() =>
-    string s = "Off hours"
-    if inAsia
-        s := "Asia (no trades)"
-    if inLondon and not inLKZ
-        s := "London range"
-    if inLKZ
-        s := "LONDON KILL ZONE"
-    if inNY and not inNYKZ and nyMin < 8 * 60 + 30
-        s := "Pre-NY (8:00–8:30)"
-    if inNYKZ
-        s := nyMin >= 10 * 60 ? "NY AM KZ · second chance" : "NY AM KILL ZONE"
-    if f_inSess("1100-1130")
-        s := "11:00–11:30 · A+ only"
-    if inLunch
-        s := "LUNCH · no trades"
-    if inPM
-        s := "NY PM · A+ only"
-    if inFriPM
-        s := "Friday PM · no trades"
-    if inNews
-        s := "NEWS WINDOW · no entries"
-    if inFOMC
-        s := "FOMC · flat"
-    s
-
 // ─────────────────────────────────────────────────────────────────────────────
 //  CHART-TF SERIES
 // ─────────────────────────────────────────────────────────────────────────────
@@ -424,7 +398,23 @@ f_struct(int piv, int neutralN) =>
     int dirOut = sinceBreak > neutralN ? 0 : dir
     float rTop = math.max(nz(lastPH, high), runHi)
     float rBot = math.min(nz(lastPL, low), runLo)
-    [dirOut[1], holdOk[1], rTop[1], rBot[1], sinceBreak[1]]
+    // hand back the PREVIOUS (confirmed) bar's values, then remember this bar's
+    var int   pDir   = 0
+    var bool  pHold  = true
+    var float pTop   = na
+    var float pBot   = na
+    var int   pSince = 0
+    int   oDir   = pDir
+    bool  oHold  = pHold
+    float oTop   = pTop
+    float oBot   = pBot
+    int   oSince = pSince
+    pDir   := dirOut
+    pHold  := holdOk
+    pTop   := rTop
+    pBot   := rBot
+    pSince := sinceBreak
+    [oDir, oHold, oTop, oBot, oSince]
 
 [b1Dir, b1Hold, rTopAuto, rBotAuto, b1Since] = request.security(syminfo.tickerid, biasTF,  f_struct(pivHTF, neutralBars), lookahead = barmerge.lookahead_on)
 [b2Dir, b2Hold, rTop2, rBot2, b2Since]       = request.security(syminfo.tickerid, bias2TF, f_struct(pivHTF, neutralBars * 2), lookahead = barmerge.lookahead_on)
@@ -628,10 +618,10 @@ f_touch(array<Gap> arr) =>
         if bar_index > g.bornBar and g.state <= 2
             bool enter = g.bull ? low <= g.top : high >= g.bottom
             if enter and not g.inside
-                g.touches += 1
+                g.touches := g.touches + 1
                 g.lastTouchBar := bar_index
                 if g.state == 2
-                    g.retests += 1
+                    g.retests := g.retests + 1
             g.inside := enter
             if g.touches >= 3 and g.state <= 1
                 g.state := 3
@@ -695,10 +685,14 @@ f_gapById(int id) =>
 
 f_stacked(Gap g) =>
     bool out = false
-    array<Gap> other = g.rank == 3 ? gapsB : gapsA
-    for o in other
-        if o.bull == g.bull and o.state <= 1 and o.bottom < g.top and o.top > g.bottom
-            out := true
+    if g.rank == 3
+        for o in gapsB
+            if o.bull == g.bull and o.state <= 1 and o.bottom < g.top and o.top > g.bottom
+                out := true
+    else
+        for o in gapsA
+            if o.bull == g.bull and o.state <= 1 and o.bottom < g.top and o.top > g.bottom
+                out := true
     out
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1162,7 +1156,9 @@ f_arm(Setup s, Setup other, Gap poi, string model, float swingTarget) =>
     if s.r < minStop
         s.stop := s.entry - dir * minStop
         s.r := minStop
-    [obst, obstName] = f_firstObstacle(dir, s.entry)
+    [obst0, obstName0] = f_firstObstacle(dir, s.entry)
+    float obst = obst0
+    string obstName = obstName0
     if not na(swingTarget) and dir * (swingTarget - s.entry) > 0 and (na(obst) or dir * (swingTarget - obst) < 0)
         obst := swingTarget
         obstName := "recent swing"
@@ -1203,7 +1199,7 @@ f_arm(Setup s, Setup other, Gap poi, string model, float swingTarget) =>
     if s.grade >= 1 and s.mult > 0 and s.contracts > 0
         s.state := 4
         s.openFrac := 0
-        poi.entries += 1
+        poi.entries := poi.entries + 1
         stats.set(4, stats.get(4) + 1)
         f_drawArmed(s)
         string summary = f_dirTxt(dir) + " " + f_gradeTxt(s.grade) + " (setup " + model + ") · " + str.tostring(s.contracts) + " ct · limit " + f_px(s.entry) + " · stop " + f_px(s.stop) + " · TP1 " + f_px(s.tp1) + " (" + str.tostring(s.roomR, "#.#") + "R) · TP2 " + f_px(s.tp2)
@@ -1295,7 +1291,8 @@ f_runA(Setup s, Setup other) =>
                 txt.set(3, "Sweep failed — price closed back through " + s.sweptName)
                 s.state := 1
             else
-                if dir == 1 ? low < s.sweepExt : high > s.sweepExt
+                bool deeper = dir == 1 ? low < s.sweepExt : high > s.sweepExt
+                if deeper
                     s.sweepExt := dir == 1 ? low : high
                 float mssCand2 = dir == 1 ? lastPH5 : lastPL5
                 if not na(mssCand2) and dir * (mssCand2 - s.sweepExt) >= mssMinAtr * atr5
@@ -1469,7 +1466,8 @@ f_manage(Setup s) =>
             s.curStop := s.stop
             txt.set(3, "Filled " + str.lower(f_dirTxt(dir)) + " at " + f_px(s.entry) + " — leave the stop alone until TP1")
             alert("MGC PB: order filled " + f_dirTxt(dir) + " " + f_px(s.entry) + " · stop " + f_px(s.stop) + " · leave the stop alone until TP1", alert.freq_once_per_bar_close)
-            if dir == 1 ? low <= s.stop : high >= s.stop
+            bool stopSameBar = dir == 1 ? low <= s.stop : high >= s.stop
+            if stopSameBar
                 s.realized := -1.0
                 f_closeTrade(s, "stopped on entry bar")
         else
@@ -1484,21 +1482,21 @@ f_manage(Setup s) =>
         bool tp1 = dir == 1 ? high >= s.tp1 : low <= s.tp1
         bool tp2 = dir == 1 ? high >= s.tp2 : low <= s.tp2
         if stopHit
-            s.realized += dir * (s.curStop - s.entry) / s.r * s.openFrac
+            s.realized := s.realized + dir * (s.curStop - s.entry) / s.r * s.openFrac
             f_closeTrade(s, s.tp1Hit ? "runner stopped" : "stopped")
         else
             if tp1 and not s.tp1Hit
                 s.tp1Hit := true
                 float frac = s.contracts == 1 ? 1.0 : s.contracts == 2 ? 0.5 : 1.0 / 3.0
-                s.realized += s.roomR * frac
-                s.openFrac -= frac
+                s.realized := s.realized + s.roomR * frac
+                s.openFrac := s.openFrac - frac
                 s.curStop := s.entry
                 txt.set(3, "TP1 hit — stop moved to breakeven")
                 alert("MGC PB: TP1 hit (" + str.tostring(s.roomR, "#.#") + "R) — ladder off, stop to breakeven", alert.freq_once_per_bar_close)
                 if s.openFrac <= 0.001
                     f_closeTrade(s, "TP1 (all)")
             if s.state == 5 and s.tp1Hit and tp2
-                s.realized += dir * (s.tp2 - s.entry) / s.r * s.openFrac
+                s.realized := s.realized + dir * (s.tp2 - s.entry) / s.r * s.openFrac
                 f_closeTrade(s, "TP2")
             if s.state == 5
                 Gap poi = f_gapById(s.poiId)
@@ -1506,7 +1504,7 @@ f_manage(Setup s) =>
                 bool timeStop = not s.tp1Hit and winClass == 0 and bar_index - s.fillBar >= timeStopBars
                 bool newsExit = not s.tp1Hit and inNews and s.grade < 3
                 if poiDead or timeStop or newsExit
-                    s.realized += dir * (close - s.entry) / s.r * s.openFrac
+                    s.realized := s.realized + dir * (close - s.entry) / s.r * s.openFrac
                     f_closeTrade(s, poiDead ? "POI failed" : timeStop ? "time stop" : "news window")
                 else if trailRunner and s.tp1Hit
                     float piv = dir == 1 ? pl5 : ph5
@@ -1630,13 +1628,18 @@ f_activeSetup() =>
 f_nowTxt(Setup s) =>
     string d = s.dir == 1 ? "long" : "short"
     string r = ""
-    switch s.state
-        0 => r := bias == 0 and not allowNeutral ? "Nothing to do while the bias is neutral" : "Waiting for price to reach a " + (bias == 1 ? "bullish" : bias == -1 ? "bearish" : "") + " zone (POI)"
-        1 => r := "At the " + s.poiTf + " zone " + f_px(s.poiBot) + "–" + f_px(s.poiTop) + " — wait for a sweep of a level there"
-        2 => r := "Swept " + s.sweptName + " — wait for a big 5m candle to close " + (s.dir == 1 ? "above " : "below ") + (na(s.mssLevel) ? "the last swing" : f_px(s.mssLevel))
-        3 => r := "Structure shifted " + d + " — wait for the 5m gap it leaves, then set the limit order"
-        4 => r := "ORDER " + str.upper(d) + " " + f_gradeTxt(s.grade) + " · limit " + f_px(s.entry) + " · stop " + f_px(s.stop) + " · " + str.tostring(s.contracts) + " ct · TP1 " + f_px(s.tp1) + " (" + str.tostring(s.roomR, "#.#") + "R)"
-        5 => r := "IN TRADE " + str.upper(d) + " · stop " + f_px(s.curStop) + (s.tp1Hit ? " (breakeven) · runner to " + f_px(s.tp2) : " · TP1 " + f_px(s.tp1) + " · leave the stop alone")
+    if s.state == 1
+        r := "At the " + s.poiTf + " zone " + f_px(s.poiBot) + "–" + f_px(s.poiTop) + " — wait for a sweep of a level there"
+    else if s.state == 2
+        r := "Swept " + s.sweptName + " — wait for a big 5m candle to close " + (s.dir == 1 ? "above " : "below ") + (na(s.mssLevel) ? "the last swing" : f_px(s.mssLevel))
+    else if s.state == 3
+        r := "Structure shifted " + d + " — wait for the 5m gap it leaves, then set the limit order"
+    else if s.state == 4
+        r := "ORDER " + str.upper(d) + " " + f_gradeTxt(s.grade) + " · limit " + f_px(s.entry) + " · stop " + f_px(s.stop) + " · " + str.tostring(s.contracts) + " ct · TP1 " + f_px(s.tp1) + " (" + str.tostring(s.roomR, "#.#") + "R)"
+    else if s.state == 5
+        r := "IN TRADE " + str.upper(d) + " · stop " + f_px(s.curStop) + (s.tp1Hit ? " (breakeven) · runner to " + f_px(s.tp2) : " · TP1 " + f_px(s.tp1) + " · leave the stop alone")
+    else
+        r := bias == 0 and not allowNeutral ? "Nothing to do while the bias is neutral" : "Waiting for price to reach a " + (bias == 1 ? "bullish" : bias == -1 ? "bearish" : "") + " zone (POI)"
     r
 
 f_nowTip(Setup s) =>
@@ -1675,8 +1678,10 @@ f_todayTxt() =>
     bool dayStop = rToday <= dailyStopR or stats.get(2) >= maxConsec or tradesToday >= maxTrades or adrUsed >= adrDone
     string t = str.tostring(tradesToday, "#") + " of " + str.tostring(maxTrades) + " trades · " + (rToday >= 0 ? "+" : "") + str.tostring(rToday, "#.#") + "R · ADR " + str.tostring(adrUsed * 100, "#") + "% used"
     t += stats.get(2) >= 1 ? " · " + str.tostring(stats.get(2), "#") + " loss streak" : ""
-    t += dayStop ? "  ■ STOP FOR THE DAY" : stats.get(3) <= weeklyStopR ? "  ■ WEEKLY STOP" : ""
-    [t, dayStop or stats.get(3) <= weeklyStopR]
+    bool weekStop = stats.get(3) <= weeklyStopR
+    t += dayStop ? "  ■ STOP FOR THE DAY" : weekStop ? "  ■ WEEKLY STOP" : ""
+    bool anyStop = dayStop or weekStop
+    [t, anyStop]
 
 f_nextNews() =>
     int best = -1
