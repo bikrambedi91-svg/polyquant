@@ -10,8 +10,13 @@ daily counters.
 
 ## 1. Install (2 minutes)
 
-1. TradingView → open **COMEX:MGC1!** (or **GC1!**) on the **5-minute** chart.
+1. TradingView → open **COMEX:MGC1!** (or **GC1!**) on the **5-minute** chart. On any other
+   timeframe the script draws nothing and the card says "Switch this chart to 5 minutes".
 2. Pine Editor → *New* → paste the whole file → *Save* → *Add to chart*.
+   The default **View** is *Clean*: the two nearest zones per side, today's levels, and a
+   7-row status card in plain English. Hover any zone, level, marker or card row for the details.
+   *Standard* adds CE lines, 5m gaps, the dealing range, session marks and clock rows;
+   *Everything* adds the full 7 + 8 checklist.
 3. Inputs → group 5 *Risk & sizing*: set **Account size** and **Risk per trade %** (0.5% until
    you have 50 journaled trades). The dashboard's *Risk* row shows the dollar figure it will size from.
 4. Inputs → group 6 *News*: type today's tier-1 releases as `hhmm` ET (e.g. `0830`, `1000`).
@@ -30,48 +35,45 @@ refinement timeframe.
 
 ## 2. What you see on the chart
 
-| Element | Drawing | Meaning |
+The chart stays quiet on purpose: short labels, muted fills, and the full story one hover away.
+
+| Element | Looks like | Hover shows |
 |---|---|---|
-| 30m gaps | Strong fill, 2px border, dashed CE line | Primary zones (rank 3) |
-| 15m gaps | Medium fill, 1px border, dashed CE | Refinement zones (rank 2) |
-| 5m gaps | Faint fill, dotted border | Triggers only |
-| Gap label (right of price) | `30m POI ★★★ · respected · touches 1 · STACKED · discount` | Role follows the current bias: **POI** (with-bias), **OBSTACLE** (opposing), **LIMBO** (5m closed through, HTF candle still open), **IFVG** (failed, flipped), **USED** (3rd touch). Stars = displacement + volume + London/NY session |
-| Grey box | Failed gap kept as IFVG | Setup C candidate for `IFVG zone life` bars |
-| Dotted horizontal lines | PDH/PDL, PWH/PWL, Asia H/L, London H/L, NY H/L, EQH/EQL | Major liquidity. Line stops with **✕** when swept, **⊘** when broken through |
-| Orange label `sweep Asia L` | Sweep confirmed at a POI | `(weak)` = reclaimed within 2–3 bars, costs one confluence |
-| Green/red label `MSS 2.4×` | Displacement close beyond the last opposite 5m swing | Ratio = body ÷ average body of the last 10 |
-| Blue line + label | Armed limit order: entry, stop, R, TP1 (room in R and what it is), TP2 (what it is), grade, contracts | Lines run for `orderExpiry` bars |
-| Grey label `SKIP LONG A — room 1.6R < 2.0R` | A trigger that failed a hard rule | Log it as a skip |
-| Result label `+2.1R · TP2` | Simulated trade closed | Feeds the daily counters |
-| Background | Blue = London KZ, teal = NY AM KZ, grey = lunch, yellow = PM, red = news window | Gold's clock |
-| ◆ AM fix / PM fix, ■ settle | 5:30, 10:00, 13:30 ET | LBMA auctions and COMEX settlement |
-| Orange line | Session VWAP (resets 6:00 PM ET) | Bias filter / confluence |
-| Purple lines | 1H dealing range top, bottom and 50% | Premium above, discount below |
+| 30m / 15m zones | Soft teal (bullish) or rose (bearish) boxes, thin border, 30m slightly stronger | Range and midpoint, what to do there, state (respected / weakening / failed / used), touches, stacked, discount/premium, quality |
+| Zone label (right edge) | `30m POI`, `15m obstacle`, `30m limbo`, `15m IFVG`, `30m used` (stars in Standard+) | Same tooltip |
+| Failed zone | Grey box kept for Setup C | Why it flipped |
+| Today's levels | Thin dotted lines with tiny right-edge labels: `PDH`, `PDL`, `Asia H/L`, `London H/L`, `NY H/L` (plus `PWH/PWL`, `EQH/EQL` in Standard+) | What the level is and what a sweep of it looks like |
+| Swept / broken level | The line stops and fades (amber = swept, grey = broken); its label disappears | — |
+| `sweep` marker | Tiny amber tag at the sweep wick | Which level, strong or weak, and what has to happen next |
+| `MSS` marker | Tiny teal/rose tag on the displacement candle | Displacement ratio, level broken, volume, what comes next |
+| Armed setup | Rose box entry→stop, teal box entry→TP1, amber entry line, dashed TP2 line, tag `LONG A+ · 2 ct` | Full order: prices, R, room, targets, contracts, dollar risk, and the whole checklist |
+| `skip` tag | Tiny grey tag | Plain-English reason and what the trade would have been |
+| `cancelled` tag | Tiny grey tag at the entry | Why the unfilled order was pulled |
+| `+2.1R` / `−1R` tag | Result of the simulated trade | How it closed |
+| Background | Faint blue = kill zone, faint red = news window (lunch shading in Standard+) | — |
+| Orange line | Session VWAP (resets 6:00 PM ET) | — |
+| Faint grey line | Dealing-range 50% (top and bottom in Standard+) | — |
+| ● AM fix / PM fix, ■ settle | Standard+ only: 5:30, 10:00, 13:30 ET | — |
+
+Colours are inputs (group 8) if you prefer your own palette.
 
 ---
 
-## 3. The dashboard, row by row
+## 3. The status card
 
-| Row | What it tells you |
-|---|---|
-| Header | Timeframes in use, or a warning if the chart is not 5m |
-| Bias | BULLISH / BEARISH / NEUTRAL with the 1H and 4H arrows; **CONFLICTED** = 1H and 4H disagree → half risk, TP1 only; *1H gap lost* = price closed through the last with-bias 1H gap |
-| Dealing range | Bottom – top, the 50%, and whether price is in DISCOUNT or PREMIUM |
-| Draw on liquidity | Nearest untouched major level above and below (or your manual DOL) |
-| Window | Where you are on gold's clock, and whether the window is TRADEABLE, A+ ONLY, or NO NEW TRADES |
-| News | Blocked / clear, and the next release you typed in |
-| HTF closes | Countdown to the next 30m and 15m closes (live bars only) — judge gaps on their own timeframe |
-| ATR · ADR | 5m ATR (stop buffer), ADR and % used → *no Setup B* at 80%, *A+ only* at 100%, *DONE* at 130% |
-| VWAP | Above / below |
-| 30m / 15m zones | Counts of POIs, obstacles and IFVGs |
-| Nearest POI / obstacle | Range, state and distance |
-| Long / Short machine | The state each direction is in: idle → AT POI → SWEPT (and what the MSS needs) → MSS ✓ → ARMED → IN TRADE |
-| Last event / Last setup | The most recent state change and the last armed or skipped setup with prices |
-| Today | Simulated trades, R, losing streak, skips → **STOP FOR THE DAY** when a limit is hit |
-| Week | Cumulative R → **WEEKLY STOP** at −5R |
-| Risk | Dollar risk per trade, point value, tick |
-| HARD RULES | The seven pass/fail rules for the last evaluated setup |
-| CONFLUENCES | The eight +1 items, the weak-sweep penalty and the half-risk cap |
+Seven rows in Clean view. Every row has a hover tooltip that explains it.
+
+| Row | Example | Meaning |
+|---|---|---|
+| Status | `● TRADEABLE — NY AM kill zone · news at 10:00` | Green: trade. Amber: A+ setups only (11:00–11:30, afternoon, last 15 min of a kill zone). Red: no new trades (lunch, Friday PM, news, FOMC, Asia). |
+| Bias | `Bullish ▲ · 1H and 4H agree` | The only direction you may trade. `4H disagrees → half risk, TP1 only`, `1H gap lost`, or `Neutral — sit out`. |
+| Now | `At the 30m zone 4,319.9–4,332.3 — wait for a sweep of a level there` | What the playbook is waiting for next, in order: reach a zone → sweep → structure shift → 5m gap → order. Turns amber once a sweep is in, green when an order is armed or a trade is on. |
+| Next zone | `30m 4,319.9–4,332.3 · 6.1 below` | The nearest with-bias zone. No zone, no trade. |
+| Targets | `first obstacle 15m bear gap 4,350.1 · draw PDH 4,362.0` | TP1 and TP2 for the bias direction, measured from the current price. |
+| Today | `0 of 3 trades · +0.0R · ADR 62% used` | Limits. Shows `■ STOP FOR THE DAY` or `■ WEEKLY STOP` when a limit is hit. |
+| Last | `Swept Asia L inside the 30m zone` | The most recent event in plain English; hover for the last setup's prices. |
+
+Standard view adds **Clock** (countdown to the 30m and 15m closes, VWAP side, discount/premium), **Volatility** (5m ATR, ADR, stop buffer, minimum stop) and **Risk** (dollar risk per grade). Everything view, or the *Show checklist* input, appends the 7 hard rules and 8 confluences of the last evaluated setup.
 
 ---
 
