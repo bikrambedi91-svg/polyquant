@@ -153,109 +153,109 @@ manRangeBot  = input.float(0, "Dealing range bottom",                           
 //  TYPES
 // ─────────────────────────────────────────────────────────────────────────────
 type Gap
-    int    id
-    string tf
-    int    rank        // 3 = primary HTF, 2 = refinement HTF, 1 = chart TF
-    bool   bull
-    float  top
-    float  bottom
-    float  ce
-    int    bornBar
-    int    bornTime
-    int    state       // 0 Respected · 1 Weakening · 2 Failed (IFVG) · 3 Used
-    int    touches     // number of entries into the gap from outside (5m)
-    bool   inside
-    bool   disp
-    bool   volOk
-    bool   sessOk
-    float  sizeAtr
-    int    quality
-    int    failedBar
-    int    retests     // IFVG retests
-    int    entries     // setups armed from this gap (1 initial + 1 re-entry max)
-    int    lastTouchBar
-    box    bx
-    line   ceLn
-    label  lb
+    int    id = 0
+    string tf = ""
+    int    rank = 0  // 3 = primary HTF, 2 = refinement HTF, 1 = chart TF
+    bool   bull = false
+    float  top = na
+    float  bottom = na
+    float  ce = na
+    int    bornBar = 0
+    int    bornTime = 0
+    int    state = 0  // 0 Respected · 1 Weakening · 2 Failed (IFVG) · 3 Used
+    int    touches = 0  // number of entries into the gap from outside (5m)
+    bool   inside = false
+    bool   disp = false
+    bool   volOk = false
+    bool   sessOk = false
+    float  sizeAtr = na
+    int    quality = 0
+    int    failedBar = 0
+    int    retests = 0  // IFVG retests
+    int    entries = 0  // setups armed from this gap (1 initial + 1 re-entry max)
+    int    lastTouchBar = 0
+    box    bx = na
+    line   ceLn = na
+    label  lb = na
 
 type Level
-    string name
-    float  price
-    bool   isHigh      // buy-side liquidity (above price) vs sell-side (below)
-    bool   major
-    bool   active
-    int    bornBar
-    int    setBar      // last bar the price was set (running levels)
-    bool   running     // session high/low that keeps extending until swept
-    int    pendBar     // bar of a close beyond the level, waiting for a reclaim
-    int    sweptBar    // bar the level was swept on (-1 = never)
-    bool   strong      // same-bar reclaim
-    float  ext         // extreme reached through the level
-    line   ln
-    label  lb
+    string name = ""
+    float  price = na
+    bool   isHigh = false  // buy-side liquidity (above price) vs sell-side (below)
+    bool   major = false
+    bool   active = false
+    int    bornBar = 0
+    int    setBar = 0  // last bar the price was set (running levels)
+    bool   running = false  // session high/low that keeps extending until swept
+    int    pendBar = 0  // bar of a close beyond the level, waiting for a reclaim
+    int    sweptBar = 0  // bar the level was swept on (-1 = never)
+    bool   strong = false  // same-bar reclaim
+    float  ext = na  // extreme reached through the level
+    line   ln = na
+    label  lb = na
 
 type Setup
-    int    dir         // 1 long · -1 short
-    int    state       // 0 idle · 1 at POI · 2 swept · 3 MSS · 4 armed · 5 in trade
-    string model       // "A" / "B" / "C"
-    int    poiId
-    string poiTf
-    float  poiTop
-    float  poiBot
-    int    poiState
-    int    poiTouches
-    bool   stacked
-    int    lastTouchBar
+    int    dir = 0  // 1 long · -1 short
+    int    state = 0  // 0 idle · 1 at POI · 2 swept · 3 MSS · 4 armed · 5 in trade
+    string model = ""  // "A" / "B" / "C"
+    int    poiId = 0
+    string poiTf = ""
+    float  poiTop = na
+    float  poiBot = na
+    int    poiState = 0
+    int    poiTouches = 0
+    bool   stacked = false
+    int    lastTouchBar = 0
     // sweep
-    bool   pending
-    float  pendLevel
-    string pendName
-    bool   pendMajor
-    int    pendBar
-    float  sweepExt
-    int    sweepBar
-    bool   strongSweep
-    bool   sweptMajor
-    string sweptName
-    bool   smtOk
+    bool   pending = false
+    float  pendLevel = na
+    string pendName = ""
+    bool   pendMajor = false
+    int    pendBar = 0
+    float  sweepExt = na
+    int    sweepBar = 0
+    bool   strongSweep = false
+    bool   sweptMajor = false
+    string sweptName = ""
+    bool   smtOk = false
     // mss
-    float  mssLevel
-    int    mssBar
-    float  mssClose
-    float  dispRatio
-    bool   volOk
-    bool   vwapOk
+    float  mssLevel = na
+    int    mssBar = 0
+    float  mssClose = na
+    float  dispRatio = na
+    bool   volOk = false
+    bool   vwapOk = false
     // entry
-    float  gapTop
-    float  gapBot
-    float  entry
-    float  stop
-    float  tp1
-    float  tp2
-    float  r
-    float  roomR
-    string tp1Name
-    string tp2Name
-    int    grade       // 3 A+ · 2 A · 1 B · 0 skip
-    int    conf
-    float  mult
-    int    contracts
-    string hardTxt
-    string confTxt
-    string reason
-    int    armedBar
+    float  gapTop = na
+    float  gapBot = na
+    float  entry = na
+    float  stop = na
+    float  tp1 = na
+    float  tp2 = na
+    float  r = na
+    float  roomR = na
+    string tp1Name = ""
+    string tp2Name = ""
+    int    grade = 0  // 3 A+ · 2 A · 1 B · 0 skip
+    int    conf = 0
+    float  mult = na
+    int    contracts = 0
+    string hardTxt = ""
+    string confTxt = ""
+    string reason = ""
+    int    armedBar = 0
     // management
-    bool   filled
-    int    fillBar
-    bool   tp1Hit
-    float  curStop
-    float  realized
-    float  openFrac
-    line   eLn
-    line   sLn
-    line   t1Ln
-    line   t2Ln
-    label  lb
+    bool   filled = false
+    int    fillBar = 0
+    bool   tp1Hit = false
+    float  curStop = na
+    float  realized = na
+    float  openFrac = na
+    line   eLn = na
+    line   sLn = na
+    line   t1Ln = na
+    line   t2Ln = na
+    label  lb = na
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  TIME HELPERS (New York clock, DST-safe)
