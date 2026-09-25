@@ -1,0 +1,1676 @@
+//@version=6
+// =============================================================================
+//  MGC PLAYBOOK v2  —  MTF Fair Value Gaps · Liquidity Sweeps · MSS · 2R Room Rule
+//  Companion indicator for docs/mgc/02_MGC_Playbook_v2.md
+//
+//  Chart: COMEX:MGC1! (or GC1!) on the 5-minute timeframe.
+//  Everything the playbook defines is either drawn, scored or alerted here:
+//    • 30m / 15m FVGs with the §8.4 filters, CE lines, colour + weight by timeframe
+//    • Gap states judged ONLY on the gap's own timeframe (Respected / Weakening / Failed / Used)
+//    • POI vs Obstacle labelling from the 1H/4H bias (auto or manual)
+//    • Liquidity: PDH/PDL, PWH/PWL, Asian, London, day H/L, equal highs/lows, 5m swings
+//    • Setup A: sweep → displacement MSS → 5m entry gap (or inverted 5m gap) → limit at CE
+//    • Setup B: nested-gap continuation · Setup C: IFVG flip retest
+//    • 2R room rule against the first opposing 15m/30m gap or major level → TP1, TP2 = DOL
+//    • 7 hard rules + 8 confluences → grade → contracts = floor(risk × mult ÷ (R × point value))
+//    • Gold's clock: kill zones, lunch, PM, tier-1 news windows, FOMC, LBMA fixes, Friday cut
+//    • Simulated management (ladder, BE at TP1, trail, time stop) → daily R / trades / streak
+//    • Dashboard with the live checklist, alerts for every state change
+//
+//  Non-repainting: HTF data uses confirmed bars only (lookahead_on + [1] offsets), and every
+//  state change is evaluated on confirmed 5m bars.
+// =============================================================================
+indicator("MGC Playbook v2 — FVG · Sweeps · MSS · Room", shorttitle = "MGC Playbook",
+     overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500,
+     max_bars_back = 500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+grpTF        = "1 · Timeframes & bias"
+htf1         = input.timeframe("30",  "Primary zone timeframe",                 group = grpTF, tooltip = "The strongest gaps. Outrank everything else.")
+htf2         = input.timeframe("15",  "Refinement timeframe",                   group = grpTF)
+biasTF       = input.timeframe("60",  "Bias timeframe",                         group = grpTF)
+bias2TF      = input.timeframe("240", "Bias confirmation timeframe",            group = grpTF)
+biasMode     = input.string("Auto", "Bias", options = ["Auto", "Bullish", "Bearish", "Neutral"], group = grpTF, tooltip = "Auto = last structural break on the bias TF, checked against the confirmation TF (playbook §7.1). Override when the higher-timeframe story says so, and log why.")
+pivHTF       = input.int(3,  "HTF swing pivot length",                          group = grpTF, minval = 2, maxval = 6)
+neutralBars  = input.int(24, "Neutral if no bias-TF break within N bars",      group = grpTF, minval = 6, maxval = 96)
+allowNeutral = input.bool(false, "Neutral bias: allow A+ range-extreme trades at half risk", group = grpTF)
+
+grpGap       = "2 · Gap filters (§3.2 / §8.4)"
+minGapAtr    = input.float(0.25, "Min HTF gap size (× that TF's ATR14)",        group = grpGap, minval = 0.05, step = 0.05)
+dispMult     = input.float(1.5,  "Displacement body (× avg body of last 10)",  group = grpGap, minval = 1.0, step = 0.1)
+closePct     = input.float(0.30, "Displacement close within outer % of range", group = grpGap, minval = 0.1, maxval = 0.5, step = 0.05)
+reqDispHTF   = input.bool(true,  "HTF gaps must come from a displacement candle", group = grpGap, tooltip = "Playbook §8.4. Turn off to see every gap; quality stars still show which ones displaced.")
+maxPerSide   = input.int(3,      "Max HTF gaps kept per side of price",         group = grpGap, minval = 1, maxval = 6)
+gapMaxAge    = input.int(576,    "Drop HTF gaps older than N chart bars",       group = grpGap, minval = 48, tooltip = "576 five-minute bars = 48 hours of trading. Fresh gaps from the previous session stay on the chart; older ones are cleared.")
+reqPD_A      = input.bool(true,  "Setup A POIs must sit in discount (longs) / premium (shorts)", group = grpGap)
+showIFVG     = input.bool(true,  "Keep failed gaps as IFVG zones (Setup C)",     group = grpGap)
+ifvgLife     = input.int(72,     "IFVG zone life (chart bars)",                  group = grpGap, minval = 12)
+show5m       = input.bool(true,  "Draw 5m gaps (faint)",                         group = grpGap)
+max5m        = input.int(24,     "Max 5m gaps kept",                             group = grpGap, minval = 6, maxval = 60)
+
+grpLiq       = "3 · Liquidity & sessions (ET)"
+asiaSess     = input.session("1800-0000", "Asian range",                        group = grpLiq)
+londonSess   = input.session("0200-0800", "London range",                       group = grpLiq)
+nyStartSess  = input.session("0800-1700", "NY session (running high/low)",     group = grpLiq)
+lkzSess      = input.session("0200-0500", "London kill zone",                   group = grpLiq)
+nykzSess     = input.session("0830-1100", "NY AM kill zone",                    group = grpLiq)
+lunchSess    = input.session("1130-1330", "No-trade lunch window",              group = grpLiq, tooltip = "Playbook: be done by 11:30 unless an A+ trade is running; lunch 12:00-1:30.")
+pmSess       = input.session("1330-1600", "NY PM window (A+ only)",             group = grpLiq)
+allowOff     = input.bool(false, "Allow A+ setups outside kill zones (except lunch/Asia/Friday PM)", group = grpLiq)
+kzTailMin    = input.int(15,     "Kill-zone tail (min): A+ only in last N minutes", group = grpLiq, minval = 0, maxval = 30)
+fridayCut    = input.bool(true,  "No new trades Friday after 12:00 ET",          group = grpLiq)
+eqTolTicks   = input.int(3,      "Equal highs/lows tolerance (ticks)",          group = grpLiq, minval = 1)
+eqTolAtr     = input.float(0.10, "Equal highs/lows tolerance (× 5m ATR)",       group = grpLiq, minval = 0.0, step = 0.05)
+pivMinor     = input.int(2,      "5m swing pivot length",                       group = grpLiq, minval = 1, maxval = 4)
+minorLook    = input.int(60,     "Minor swing liquidity lookback (bars)",       group = grpLiq, minval = 12)
+showMinor    = input.bool(false, "Mark minor 5m swing levels",                   group = grpLiq)
+showLBMA     = input.bool(true,  "Mark LBMA fixes (5:30 / 10:00 ET) and settlement (1:30)", group = grpLiq)
+
+grpTrig      = "4 · Trigger: sweep → MSS → entry (§3.4 / §9)"
+reclaimBars  = input.int(3,      "Sweep reclaim window (bars)",                 group = grpTrig, minval = 1, maxval = 6)
+sweepTolAtr  = input.float(0.5,  "Swept level must be within POI ± (× 5m ATR)", group = grpTrig, minval = 0.0, step = 0.1)
+atPoiBars    = input.int(6,      "Stay 'at POI' for N bars after last touch",    group = grpTrig, minval = 1, maxval = 24)
+mssWindow    = input.int(12,     "MSS must print within N bars of the sweep",   group = grpTrig, minval = 3, maxval = 36)
+mssMinAtr    = input.float(0.5,  "MSS swing must be ≥ (× 5m ATR) above sweep",  group = grpTrig, minval = 0.0, step = 0.1)
+entryGapBars = input.int(3,      "Look for the 5m entry gap within N bars of MSS", group = grpTrig, minval = 1, maxval = 6)
+tinyTicks    = input.int(5,      "Tiny gap (ticks): enter at near edge",         group = grpTrig, minval = 1)
+tinyAtr      = input.float(0.10, "Tiny gap (× 5m ATR)",                         group = grpTrig, minval = 0.0, step = 0.05)
+bufPct       = input.float(0.12, "Stop buffer (× 5m ATR beyond sweep extreme)", group = grpTrig, minval = 0.0, step = 0.01)
+minBufTicks  = input.int(3,      "Min stop buffer (ticks)",                      group = grpTrig, minval = 0)
+minStopTicks = input.int(25,     "Min stop distance (ticks)",                    group = grpTrig, minval = 5)
+minRoomR     = input.float(2.0,  "Min room to first obstacle (R)",               group = grpTrig, minval = 1.0, step = 0.1)
+orderExpiry  = input.int(12,     "Cancel unfilled order after N bars",           group = grpTrig, minval = 3)
+timeStopBars = input.int(12,     "Time stop: bars without TP1 after window ends", group = grpTrig, minval = 3)
+enableB      = input.bool(true,  "Enable Setup B (nested-gap continuation)",     group = grpTrig)
+enableC      = input.bool(true,  "Enable Setup C (IFVG flip retest)",            group = grpTrig)
+bLegBars     = input.int(36,     "Setup B: MSS must be within N bars",           group = grpTrig, minval = 6)
+trailRunner  = input.bool(true,  "Trail runner under new 5m higher lows after TP1", group = grpTrig)
+
+grpRisk      = "5 · Risk & sizing (§3.5 / §13)"
+acctSize     = input.float(10000, "Account size ($)",                           group = grpRisk, minval = 100)
+riskPct      = input.float(0.5,  "Risk per trade (%)",                          group = grpRisk, minval = 0.05, step = 0.05)
+riskFixed    = input.float(0,    "Fixed risk per trade ($, 0 = use %)",         group = grpRisk, minval = 0)
+allowB       = input.bool(false, "Allow B-grade setups at quarter risk",         group = grpRisk)
+maxTrades    = input.int(3,      "Max trades per day",                          group = grpRisk, minval = 1)
+dailyStopR   = input.float(-2.0, "Daily stop (R)",                              group = grpRisk, maxval = 0, step = 0.5)
+maxConsec    = input.int(2,      "Max consecutive losses",                       group = grpRisk, minval = 1)
+weeklyStopR  = input.float(-5.0, "Weekly stop (R)",                             group = grpRisk, maxval = 0, step = 0.5)
+adrNoB       = input.float(0.80, "ADR used ≥ → no Setup B",                     group = grpRisk, minval = 0.3, step = 0.05)
+adrAplus     = input.float(1.00, "ADR used ≥ → Setup A, A+ only",               group = grpRisk, minval = 0.5, step = 0.05)
+adrDone      = input.float(1.30, "ADR used ≥ → done for the day",               group = grpRisk, minval = 0.8, step = 0.05)
+calmOK       = input.bool(true,  "Hard rule 7: I am within my limits and calm", group = grpRisk)
+manTrades    = input.int(0,      "Manual adjustment: trades taken today (+)",   group = grpRisk, minval = 0)
+manR         = input.float(0,    "Manual adjustment: R booked today (+/-)",     group = grpRisk, step = 0.1)
+
+grpNews      = "6 · News windows (ET, hhmm)"
+news1        = input.string("0830", "Tier-1 release 1",                          group = grpNews)
+news2        = input.string("",     "Tier-1 release 2",                          group = grpNews, tooltip = "e.g. 1000 for ISM / UMich / JOLTS")
+news3        = input.string("",     "Tier-1 release 3",                          group = grpNews, tooltip = "e.g. 1300 for Treasury auctions")
+newsHalf     = input.int(15,        "No-entry window either side (min)",         group = grpNews, minval = 5, maxval = 45)
+fomcDay      = input.bool(false,    "FOMC day: flat 13:45–15:30",                group = grpNews)
+
+grpSMT       = "7 · SMT (optional)"
+smtOn        = input.bool(false, "Use silver SMT confluence",                    group = grpSMT)
+smtSym       = input.symbol("COMEX:SI1!", "SMT symbol",                          group = grpSMT)
+smtLook      = input.int(20, "SMT lookback (bars)",                              group = grpSMT, minval = 5)
+
+grpDisp      = "8 · Display"
+showTable    = input.bool(true,  "Dashboard",                                    group = grpDisp)
+showCheck    = input.bool(true,  "Dashboard: show checklist rows",               group = grpDisp)
+tblPos       = input.string("Top right", "Dashboard position", options = ["Top right", "Top left", "Bottom right", "Bottom left"], group = grpDisp)
+tblSize      = input.string("small", "Dashboard text size", options = ["tiny", "small", "normal"], group = grpDisp)
+showKZ       = input.bool(true,  "Shade kill zones / lunch / news",              group = grpDisp)
+showVWAP     = input.bool(true,  "Session VWAP",                                 group = grpDisp)
+showRange    = input.bool(true,  "Dealing range + 50% line",                     group = grpDisp)
+showLevels   = input.bool(true,  "Liquidity level lines",                        group = grpDisp)
+showGapLbl   = input.bool(true,  "Gap labels",                                   group = grpDisp)
+cBull        = input.color(color.new(#26a69a, 0), "Bullish", group = grpDisp, inline = "c")
+cBear        = input.color(color.new(#ef5350, 0), "Bearish", group = grpDisp, inline = "c")
+cIFVG        = input.color(color.new(#9e9e9e, 0), "IFVG",    group = grpDisp, inline = "c")
+
+grpMan       = "9 · Manual overrides (0 = auto)"
+manDOLup     = input.float(0, "Draw on liquidity — above (bullish target)",     group = grpMan, minval = 0)
+manDOLdn     = input.float(0, "Draw on liquidity — below (bearish target)",     group = grpMan, minval = 0)
+manRangeTop  = input.float(0, "Dealing range top",                              group = grpMan, minval = 0)
+manRangeBot  = input.float(0, "Dealing range bottom",                           group = grpMan, minval = 0)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  TYPES
+// ─────────────────────────────────────────────────────────────────────────────
+type Gap
+    int    id
+    string tf
+    int    rank        // 3 = primary HTF, 2 = refinement HTF, 1 = chart TF
+    bool   bull
+    float  top
+    float  bottom
+    float  ce
+    int    bornBar
+    int    bornTime
+    int    state       // 0 Respected · 1 Weakening · 2 Failed (IFVG) · 3 Used
+    int    touches     // number of entries into the gap from outside (5m)
+    bool   inside
+    bool   disp
+    bool   volOk
+    bool   sessOk
+    float  sizeAtr
+    int    quality
+    int    failedBar
+    int    retests     // IFVG retests
+    int    entries     // setups armed from this gap (1 initial + 1 re-entry max)
+    int    lastTouchBar
+    box    bx
+    line   ceLn
+    label  lb
+
+type Level
+    string name
+    float  price
+    bool   isHigh      // buy-side liquidity (above price) vs sell-side (below)
+    bool   major
+    bool   active
+    int    bornBar
+    int    setBar      // last bar the price was set (running levels)
+    bool   running     // session high/low that keeps extending until swept
+    int    pendBar     // bar of a close beyond the level, waiting for a reclaim
+    int    sweptBar    // bar the level was swept on (-1 = never)
+    bool   strong      // same-bar reclaim
+    float  ext         // extreme reached through the level
+    line   ln
+    label  lb
+
+type Setup
+    int    dir         // 1 long · -1 short
+    int    state       // 0 idle · 1 at POI · 2 swept · 3 MSS · 4 armed · 5 in trade
+    string model       // "A" / "B" / "C"
+    int    poiId
+    string poiTf
+    float  poiTop
+    float  poiBot
+    int    poiState
+    int    poiTouches
+    bool   stacked
+    int    lastTouchBar
+    // sweep
+    bool   pending
+    float  pendLevel
+    string pendName
+    bool   pendMajor
+    int    pendBar
+    float  sweepExt
+    int    sweepBar
+    bool   strongSweep
+    bool   sweptMajor
+    string sweptName
+    bool   smtOk
+    // mss
+    float  mssLevel
+    int    mssBar
+    float  mssClose
+    float  dispRatio
+    bool   volOk
+    bool   vwapOk
+    // entry
+    float  gapTop
+    float  gapBot
+    float  entry
+    float  stop
+    float  tp1
+    float  tp2
+    float  r
+    float  roomR
+    string tp1Name
+    string tp2Name
+    int    grade       // 3 A+ · 2 A · 1 B · 0 skip
+    int    conf
+    float  mult
+    int    contracts
+    string hardTxt
+    string confTxt
+    string reason
+    int    armedBar
+    // management
+    bool   filled
+    int    fillBar
+    bool   tp1Hit
+    float  curStop
+    float  realized
+    float  openFrac
+    line   eLn
+    line   sLn
+    line   t1Ln
+    line   t2Ln
+    label  lb
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  TIME HELPERS (New York clock, DST-safe)
+// ─────────────────────────────────────────────────────────────────────────────
+tz = "America/New_York"
+f_inSess(string sess) => not na(time(timeframe.period, sess, tz))
+f_parseHHMM(string s) =>
+    string t = str.replace_all(s, ":", "")
+    int out = -1
+    if str.length(t) >= 4
+        float hh = str.tonumber(str.substring(t, 0, 2))
+        float mm = str.tonumber(str.substring(t, 2, 4))
+        if not na(hh) and not na(mm)
+            out := int(hh) * 60 + int(mm)
+    out
+f_sessEnd(string sess) =>
+    int out = -1
+    if str.length(sess) >= 9
+        out := f_parseHHMM(str.substring(sess, 5, 9))
+    out
+f_fmtMin(int m) =>
+    str.format("{0,number,00}:{1,number,00}", math.floor(m / 60.0), m % 60)
+
+nyHour   = hour(time, tz)
+nyMinute = minute(time, tz)
+nyMin    = nyHour * 60 + nyMinute
+nyDow    = dayofweek(time, tz)
+
+inAsia   = f_inSess(asiaSess)
+inLondon = f_inSess(londonSess)
+inNY     = f_inSess(nyStartSess)
+inLKZ    = f_inSess(lkzSess)
+inNYKZ   = f_inSess(nykzSess)
+inLunch  = f_inSess(lunchSess)
+inPM     = f_inSess(pmSess)
+inKZ     = inLKZ or inNYKZ
+
+lkzEnd   = f_sessEnd(lkzSess)
+nykzEnd  = f_sessEnd(nykzSess)
+kzTail   = (inLKZ and lkzEnd > 0 and nyMin >= lkzEnd - kzTailMin) or (inNYKZ and nykzEnd > 0 and nyMin >= nykzEnd - kzTailMin)
+
+n1 = f_parseHHMM(news1)
+n2 = f_parseHHMM(news2)
+n3 = f_parseHHMM(news3)
+f_nearNews(int m) => m >= 0 and math.abs(nyMin - m) <= newsHalf
+inNews   = f_nearNews(n1) or f_nearNews(n2) or f_nearNews(n3)
+inFOMC   = fomcDay and nyMin >= 13 * 60 + 45 and nyMin <= 15 * 60 + 30
+inFriPM  = fridayCut and nyDow == dayofweek.friday and nyMin >= 12 * 60
+newsBlock = inNews or inFOMC
+
+// Window class: 0 = blocked, 1 = kill zone, 2 = A+ only
+f_windowClass() =>
+    int cls = 0
+    if inKZ
+        cls := kzTail ? 2 : 1
+    else if inPM or f_inSess("1100-1130")
+        cls := 2
+    else if allowOff and not inLunch and not inAsia
+        cls := 2
+    if inLunch or inFriPM or newsBlock
+        cls := 0
+    cls
+winClass = f_windowClass()
+f_windowName() =>
+    string s = "Off hours"
+    if inAsia
+        s := "Asia (no trades)"
+    if inLondon and not inLKZ
+        s := "London range"
+    if inLKZ
+        s := "LONDON KILL ZONE"
+    if inNY and not inNYKZ and nyMin < 8 * 60 + 30
+        s := "Pre-NY (8:00–8:30)"
+    if inNYKZ
+        s := nyMin >= 10 * 60 ? "NY AM KZ · second chance" : "NY AM KILL ZONE"
+    if f_inSess("1100-1130")
+        s := "11:00–11:30 · A+ only"
+    if inLunch
+        s := "LUNCH · no trades"
+    if inPM
+        s := "NY PM · A+ only"
+    if inFriPM
+        s := "Friday PM · no trades"
+    if inNews
+        s := "NEWS WINDOW · no entries"
+    if inFOMC
+        s := "FOMC · flat"
+    s
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  CHART-TF SERIES
+// ─────────────────────────────────────────────────────────────────────────────
+tick     = syminfo.mintick
+ptVal    = syminfo.pointvalue
+atr5     = ta.atr(14)
+body     = math.abs(close - open)
+avgBody  = ta.sma(body, 10)
+volSma   = ta.sma(volume, 20)
+sVwap     = ta.vwap(hlc3, timeframe.change("D"))
+newDay   = timeframe.change("D")
+newWeek  = timeframe.change("W")
+chartSec = timeframe.in_seconds(timeframe.period)
+tfWarn   = chartSec > timeframe.in_seconds(htf2) or chartSec > 900
+
+// Displacement test in a direction (single bar, or 2-bar sequence)
+f_disp(int dir) =>
+    bool oneBar = dir * (close - open) > 0 and body >= dispMult * nz(avgBody[1], body) and (dir == 1 ? (high - close) : (close - low)) <= closePct * math.max(high - low, tick)
+    float hi2 = math.max(high, high[1])
+    float lo2 = math.min(low, low[1])
+    bool twoBar = dir * (close - open) > 0 and dir * (close[1] - open[1]) > 0 and dir * (close - open[1]) >= 1.5 * dispMult * nz(avgBody[2], body) and (dir == 1 ? (hi2 - close) : (close - lo2)) <= closePct * math.max(hi2 - lo2, tick)
+    float ratio = nz(avgBody[1], 0) > 0 ? body / avgBody[1] : 0
+    [oneBar or twoBar, ratio]
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  HIGHER-TIMEFRAME DATA (confirmed bars only → non-repainting)
+// ─────────────────────────────────────────────────────────────────────────────
+[h1a, l1a, c1a, o1a, h2a, l2a, c2a, o2a, h3a, l3a, t2a, v2a, atrA, abA, vsA] = request.security(syminfo.tickerid, htf1,
+     [high[1], low[1], close[1], open[1], high[2], low[2], close[2], open[2], high[3], low[3], time[2], volume[2],
+      ta.atr(14)[1], ta.sma(math.abs(close - open), 10)[3], ta.sma(volume, 20)[3]], lookahead = barmerge.lookahead_on)
+[h1b, l1b, c1b, o1b, h2b, l2b, c2b, o2b, h3b, l3b, t2b, v2b, atrB, abB, vsB] = request.security(syminfo.tickerid, htf2,
+     [high[1], low[1], close[1], open[1], high[2], low[2], close[2], open[2], high[3], low[3], time[2], volume[2],
+      ta.atr(14)[1], ta.sma(math.abs(close - open), 10)[3], ta.sma(volume, 20)[3]], lookahead = barmerge.lookahead_on)
+chgA = timeframe.change(htf1)
+chgB = timeframe.change(htf2)
+
+// Bias / dealing range engine, evaluated on the bias timeframes (§7.1)
+f_struct(int piv, int neutralN) =>
+    var float lastPH = na
+    var float lastPL = na
+    var bool  phBroken = true
+    var bool  plBroken = true
+    var int   dir = 0
+    var int   lastBreak = 0
+    var float runHi = na
+    var float runLo = na
+    var float bullGapBot = na
+    var float bearGapTop = na
+    float ph = ta.pivothigh(high, piv, piv)
+    float pl = ta.pivotlow(low, piv, piv)
+    float loSince = ta.lowest(low, piv + 1)
+    float hiSince = ta.highest(high, piv + 1)
+    if not na(ph)
+        lastPH := ph
+        phBroken := false
+        runLo := loSince
+    if not na(pl)
+        lastPL := pl
+        plBroken := false
+        runHi := hiSince
+    runHi := na(runHi) ? high : math.max(runHi, high)
+    runLo := na(runLo) ? low : math.min(runLo, low)
+    if not phBroken and not na(lastPH) and close > lastPH
+        dir := 1
+        lastBreak := bar_index
+        phBroken := true
+    if not plBroken and not na(lastPL) and close < lastPL
+        dir := -1
+        lastBreak := bar_index
+        plBroken := true
+    if low > high[2]
+        bullGapBot := high[2]
+    if high < low[2]
+        bearGapTop := low[2]
+    bool holdOk = dir == 1 ? (na(bullGapBot) or close >= bullGapBot) : dir == -1 ? (na(bearGapTop) or close <= bearGapTop) : true
+    int sinceBreak = bar_index - lastBreak
+    int dirOut = sinceBreak > neutralN ? 0 : dir
+    float rTop = math.max(nz(lastPH, high), runHi)
+    float rBot = math.min(nz(lastPL, low), runLo)
+    [dirOut[1], holdOk[1], rTop[1], rBot[1], sinceBreak[1]]
+
+[b1Dir, b1Hold, rTopAuto, rBotAuto, b1Since] = request.security(syminfo.tickerid, biasTF,  f_struct(pivHTF, neutralBars), lookahead = barmerge.lookahead_on)
+[b2Dir, b2Hold, rTop2, rBot2, b2Since]       = request.security(syminfo.tickerid, bias2TF, f_struct(pivHTF, neutralBars * 2), lookahead = barmerge.lookahead_on)
+
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[pwh, pwl] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+adr        = request.security(syminfo.tickerid, "D", ta.atr(14)[1], lookahead = barmerge.lookahead_on)
+
+smtLow     = request.security(smtSym, timeframe.period, low,  ignore_invalid_symbol = true)
+smtHigh    = request.security(smtSym, timeframe.period, high, ignore_invalid_symbol = true)
+smtLowPrev = request.security(smtSym, timeframe.period, ta.lowest(low, smtLook)[1],  ignore_invalid_symbol = true)
+smtHighPrev= request.security(smtSym, timeframe.period, ta.highest(high, smtLook)[1], ignore_invalid_symbol = true)
+goldLowPrev  = ta.lowest(low, smtLook)[1]
+goldHighPrev = ta.highest(high, smtLook)[1]
+
+// Bias resolution
+int  bias = 0
+bool conflicted = false
+if biasMode == "Bullish"
+    bias := 1
+else if biasMode == "Bearish"
+    bias := -1
+else if biasMode == "Neutral"
+    bias := 0
+else
+    bias := nz(b1Dir, 0)
+    if bias != 0 and not b1Hold
+        bias := 0
+    conflicted := bias != 0 and nz(b2Dir, 0) != 0 and nz(b2Dir, 0) != bias
+
+// Dealing range + premium/discount
+rangeTop = manRangeTop > 0 ? manRangeTop : rTopAuto
+rangeBot = manRangeBot > 0 ? manRangeBot : rBotAuto
+pd50     = (rangeTop + rangeBot) / 2
+f_inDiscount(int dir, float px) => dir == 1 ? px <= pd50 : px >= pd50
+
+// Day range / ADR budget
+var float dayHi = na
+var float dayLo = na
+if newDay
+    dayHi := high
+    dayLo := low
+else
+    dayHi := math.max(nz(dayHi, high), high)
+    dayLo := math.min(nz(dayLo, low), low)
+adrUsed = adr > 0 ? (dayHi - dayLo) / adr : 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  GLOBAL STATE (arrays so functions can mutate them)
+// ─────────────────────────────────────────────────────────────────────────────
+var array<Gap>   gapsA  = array.new<Gap>()      // primary HTF gaps (30m)
+var array<Gap>   gapsB  = array.new<Gap>()      // refinement HTF gaps (15m)
+var array<Gap>   gaps5  = array.new<Gap>()      // chart-TF gaps (5m)
+var array<Level> levels = array.new<Level>()
+var array<int>   seq    = array.new<int>(1, 0)
+// stats: 0 trades today · 1 R today · 2 consecutive losses · 3 R this week · 4 setups armed today · 5 last result R · 6 skips today
+var array<float> stats  = array.new<float>(7, 0.0)
+// per-direction memory: index 0 = long, 1 = short
+var array<int>   mssBarArr   = array.new<int>(2, -1)    // bar of the last confirmed MSS
+var array<bool>  mssVolArr   = array.new<bool>(2, false)
+var array<int>   pullbackArr = array.new<int>(2, 0)     // pullbacks seen since that MSS (Setup B wants the first)
+var array<int>   lastSkipBar = array.new<int>(2, -1)
+
+f_nextId() =>
+    int v = seq.get(0) + 1
+    seq.set(0, v)
+    v
+f_idx(int dir) => dir == 1 ? 0 : 1
+
+// 5m swings (minor liquidity, MSS reference, trailing)
+ph5 = ta.pivothigh(high, pivMinor, pivMinor)
+pl5 = ta.pivotlow(low, pivMinor, pivMinor)
+var float lastPH5 = na
+var float prevPH5 = na
+var float lastPL5 = na
+var float prevPL5 = na
+var int   lastPH5Bar = -1
+var int   lastPL5Bar = -1
+eqTol = math.max(eqTolTicks * tick, eqTolAtr * atr5)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  GAP ENGINE
+// ─────────────────────────────────────────────────────────────────────────────
+f_gapBase(bool bull, int state) => state == 2 ? cIFVG : bull ? cBull : cBear
+f_gapFill(bool bull, int rank, int state) =>
+    color.new(f_gapBase(bull, state), state == 2 ? 90 : state == 3 ? 94 : rank == 3 ? 78 : rank == 2 ? 86 : 93)
+f_gapBorder(bool bull, int rank, int state) =>
+    color.new(f_gapBase(bull, state), state == 2 ? 40 : state == 3 ? 70 : rank == 1 ? 60 : 0)
+
+f_delGap(Gap g) =>
+    if not na(g.bx)
+        box.delete(g.bx)
+    if not na(g.ceLn)
+        line.delete(g.ceLn)
+    if not na(g.lb)
+        label.delete(g.lb)
+
+f_restyleGap(Gap g) =>
+    if not na(g.bx)
+        box.set_bgcolor(g.bx, f_gapFill(g.bull, g.rank, g.state))
+        box.set_border_color(g.bx, f_gapBorder(g.bull, g.rank, g.state))
+    if not na(g.ceLn)
+        line.set_color(g.ceLn, f_gapBorder(g.bull, g.rank, g.state))
+    if not na(g.lb)
+        label.set_textcolor(g.lb, f_gapBorder(g.bull, g.rank, g.state))
+
+f_newGap(array<Gap> arr, string tfName, int rank, bool bull, float top, float bottom, int bornT, bool disp, bool volOk, bool sessOk, float sizeAtr) =>
+    Gap g = Gap.new()
+    g.id       := f_nextId()
+    g.tf       := tfName
+    g.rank     := rank
+    g.bull     := bull
+    g.top      := top
+    g.bottom   := bottom
+    g.ce       := (top + bottom) / 2
+    g.bornBar  := bar_index
+    g.bornTime := bornT
+    g.state    := 0
+    g.touches  := 0
+    g.inside   := false
+    g.disp     := disp
+    g.volOk    := volOk
+    g.sessOk   := sessOk
+    g.sizeAtr  := sizeAtr
+    g.quality  := (disp ? 1 : 0) + (volOk ? 1 : 0) + (sessOk ? 1 : 0)
+    g.failedBar := -1
+    g.retests  := 0
+    g.entries  := 0
+    g.lastTouchBar := -1
+    if rank > 1 or show5m
+        g.bx := box.new(bornT, top, time, bottom, xloc = xloc.bar_time, extend = extend.right,
+             border_color = f_gapBorder(bull, rank, 0), border_width = rank == 3 ? 2 : 1,
+             border_style = rank == 1 ? line.style_dotted : line.style_solid, bgcolor = f_gapFill(bull, rank, 0))
+        if rank > 1
+            g.ceLn := line.new(bornT, g.ce, time, g.ce, xloc = xloc.bar_time, extend = extend.right,
+                 color = f_gapBorder(bull, rank, 0), style = line.style_dashed, width = 1)
+            if showGapLbl
+                g.lb := label.new(bar_index, g.ce, "", xloc = xloc.bar_index, style = label.style_label_left,
+                     color = color.new(color.black, 100), textcolor = f_gapBorder(bull, rank, 0), size = size.tiny)
+    arr.push(g)
+
+// Detect a new HTF gap from the last three CONFIRMED HTF candles (called on the first chart bar of a new HTF bar)
+f_detectHTF(array<Gap> arr, string tfName, int rank, float h1, float l1, float h2, float l2, float c2, float o2, float h3, float l3, int t2, float v2, float atrH, float ab3, float vs3) =>
+    if not na(h3) and not na(l1) and not na(atrH) and atrH > 0
+        bool bullFvg = l1 > h3
+        bool bearFvg = h1 < l3
+        if bullFvg or bearFvg
+            float top = bullFvg ? l1 : l3
+            float bot = bullFvg ? h3 : h1
+            float sz  = top - bot
+            float b2  = math.abs(c2 - o2)
+            bool disp = b2 >= dispMult * nz(ab3, b2) and (bullFvg ? (h2 - c2) : (c2 - l2)) <= closePct * math.max(h2 - l2, tick)
+            bool volOk = not na(vs3) and v2 >= vs3
+            int  mins  = hour(t2, tz) * 60 + minute(t2, tz)
+            bool sessOk = mins >= 120 and mins <= 690
+            if sz >= minGapAtr * atrH and (disp or not reqDispHTF)
+                f_newGap(arr, tfName, rank, bullFvg, top, bot, t2, disp, volOk, sessOk, sz / atrH)
+
+// Detect a chart-TF gap (the 5m gaps are triggers, never setups)
+f_detect5m() =>
+    bool bullFvg = low > high[2]
+    bool bearFvg = high < low[2]
+    if bullFvg or bearFvg
+        float top = bullFvg ? low : low[2]
+        float bot = bullFvg ? high[2] : high
+        float b2  = math.abs(close[1] - open[1])
+        bool disp = b2 >= dispMult * nz(avgBody[2], b2)
+        bool volOk = volume[1] >= nz(volSma[2], volume[1])
+        f_newGap(gaps5, timeframe.period + "m", 1, bullFvg, top, bot, time[1], disp, volOk, inKZ[1], atr5 > 0 ? (top - bot) / atr5 : 0)
+
+// Judge gaps on their OWN timeframe: called with the just-closed HTF candle
+f_htfClose(array<Gap> arr, float c1) =>
+    for g in arr
+        if g.state <= 1
+            if g.bull
+                if c1 < g.bottom
+                    g.state := 2
+                    g.failedBar := bar_index
+                else if c1 < g.ce and g.state == 0
+                    g.state := 1
+            else
+                if c1 > g.top
+                    g.state := 2
+                    g.failedBar := bar_index
+                else if c1 > g.ce and g.state == 0
+                    g.state := 1
+            if g.state != 0
+                f_restyleGap(g)
+            if g.state == 2
+                alert("MGC PB: " + g.tf + (g.bull ? " bullish" : " bearish") + " gap FAILED on its own timeframe → IFVG " + str.tostring(g.bottom, format.mintick) + "–" + str.tostring(g.top, format.mintick), alert.freq_once_per_bar_close)
+        else if g.state == 2
+            // flipped zone re-fails when its own TF closes back through it
+            if (g.bull and c1 > g.top) or (not g.bull and c1 < g.bottom)
+                g.state := 4
+    true
+
+// Chart-TF touch counting (one entry from outside = one reaction)
+f_touch(array<Gap> arr) =>
+    for g in arr
+        if bar_index > g.bornBar and g.state <= 2
+            bool enter = g.bull ? low <= g.top : high >= g.bottom
+            if enter and not g.inside
+                g.touches += 1
+                g.lastTouchBar := bar_index
+                if g.state == 2
+                    g.retests += 1
+            g.inside := enter
+            if g.touches >= 3 and g.state <= 1
+                g.state := 3
+                g.failedBar := bar_index
+                f_restyleGap(g)
+
+f_prune(array<Gap> arr, bool isHTF) =>
+    int i = 0
+    while i < arr.size()
+        Gap g = arr.get(i)
+        bool drop = false
+        if g.state == 4
+            drop := true
+        else if g.state == 2
+            drop := not isHTF or not showIFVG or bar_index - g.failedBar > ifvgLife
+        else if g.state == 3
+            drop := bar_index - g.failedBar > 36
+        else if isHTF
+            drop := bar_index - g.bornBar > gapMaxAge
+        else
+            drop := arr.size() > max5m and i == 0
+        if drop
+            f_delGap(g)
+            arr.remove(i)
+        else
+            i += 1
+    true
+
+f_pruneSide(array<Gap> arr, bool above) =>
+    int count = 0
+    for g in arr
+        if g.state <= 1 and (above ? g.bottom > close : g.top < close)
+            count += 1
+    while count > maxPerSide
+        int worst = -1
+        float worstD = -1.0
+        for [i, g] in arr
+            if g.state <= 1 and (above ? g.bottom > close : g.top < close)
+                float d = above ? g.bottom - close : close - g.top
+                if d > worstD
+                    worstD := d
+                    worst := i
+        if worst >= 0
+            f_delGap(arr.get(worst))
+            arr.remove(worst)
+            count -= 1
+        else
+            break
+    true
+
+f_gapById(int id) =>
+    Gap out = na
+    for g in gapsA
+        if g.id == id
+            out := g
+    if na(out)
+        for g in gapsB
+            if g.id == id
+                out := g
+    out
+
+f_stacked(Gap g) =>
+    bool out = false
+    array<Gap> other = g.rank == 3 ? gapsB : gapsA
+    for o in other
+        if o.bull == g.bull and o.state <= 1 and o.bottom < g.top and o.top > g.bottom
+            out := true
+    out
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  LIQUIDITY ENGINE
+// ─────────────────────────────────────────────────────────────────────────────
+f_delLevel(Level L) =>
+    if not na(L.ln)
+        line.delete(L.ln)
+    if not na(L.lb)
+        label.delete(L.lb)
+
+f_endLine(Level L, bool swept) =>
+    if not na(L.ln)
+        line.set_extend(L.ln, extend.none)
+        line.set_x2(L.ln, bar_index)
+        line.set_color(L.ln, color.new(swept ? color.orange : color.gray, 55))
+    if not na(L.lb) and L.major
+        label.set_text(L.lb, L.name + (swept ? " ✕" : " ⊘"))
+
+f_newLevel(string name, float px, bool isHigh, bool major, bool running, int xOff) =>
+    Level L = Level.new()
+    L.name := name
+    L.price := px
+    L.isHigh := isHigh
+    L.major := major
+    L.active := true
+    L.running := running
+    L.bornBar := bar_index
+    L.setBar := bar_index
+    L.pendBar := -1
+    L.sweptBar := -1
+    L.strong := false
+    L.ext := px
+    if major and showLevels
+        L.ln := line.new(bar_index - xOff, px, bar_index, px, xloc = xloc.bar_index, extend = extend.right,
+             color = color.new(isHigh ? cBear : cBull, 35), style = line.style_dotted, width = 1)
+        L.lb := label.new(bar_index - xOff, px, name, xloc = xloc.bar_index,
+             style = isHigh ? label.style_label_lower_left : label.style_label_upper_left,
+             color = color.new(color.black, 100), textcolor = color.new(isHigh ? cBear : cBull, 20), size = size.tiny)
+    else if showMinor
+        L.lb := label.new(bar_index - xOff, px, "", xloc = xloc.bar_index,
+             style = isHigh ? label.style_triangledown : label.style_triangleup, color = color.new(color.gray, 60), size = size.tiny)
+    levels.push(L)
+
+f_replaceLevel(string name, float px, bool isHigh, bool major, bool running) =>
+    for L in levels
+        if L.name == name and L.active
+            L.active := false
+            f_delLevel(L)
+            L.ln := na
+            L.lb := na
+    if not na(px)
+        f_newLevel(name, px, isHigh, major, running, 0)
+
+// Per-bar sweep / break detection for every active level
+f_levelsUpdate() =>
+    for L in levels
+        if L.active
+            bool through = L.isHigh ? high > L.price : low < L.price
+            bool back    = L.isHigh ? close < L.price : close > L.price
+            float ext    = L.isHigh ? high : low
+            if L.pendBar < 0
+                if through
+                    if L.running and bar_index - L.setBar < 6
+                        L.price := ext
+                        L.setBar := bar_index
+                        L.ext := ext
+                        if not na(L.ln)
+                            line.set_y1(L.ln, ext)
+                            line.set_y2(L.ln, ext)
+                        if not na(L.lb)
+                            label.set_y(L.lb, ext)
+                    else if back
+                        L.active := false
+                        L.sweptBar := bar_index
+                        L.strong := true
+                        L.ext := ext
+                        f_endLine(L, true)
+                    else if L.running
+                        L.price := ext
+                        L.setBar := bar_index
+                        L.ext := ext
+                        if not na(L.ln)
+                            line.set_y1(L.ln, ext)
+                            line.set_y2(L.ln, ext)
+                        if not na(L.lb)
+                            label.set_y(L.lb, ext)
+                    else
+                        L.pendBar := bar_index
+                        L.ext := ext
+            else
+                L.ext := L.isHigh ? math.max(L.ext, high) : math.min(L.ext, low)
+                if back and bar_index - L.pendBar <= reclaimBars - 1
+                    L.active := false
+                    L.sweptBar := bar_index
+                    L.strong := false
+                    f_endLine(L, true)
+                else if bar_index - L.pendBar >= reclaimBars - 1
+                    L.active := false
+                    f_endLine(L, false)
+    // running levels that were swept respawn at the new extreme (collect first, then create)
+    array<Level> respawn = array.new<Level>()
+    for L in levels
+        if not L.active and L.running and L.sweptBar == bar_index and L.pendBar < 0
+            L.running := false
+            respawn.push(L)
+    for L in respawn
+        f_newLevel(L.name, L.ext, L.isHigh, L.major, true, 0)
+
+f_levelsPrune() =>
+    int i = 0
+    while i < levels.size()
+        Level L = levels.get(i)
+        bool drop = false
+        if not L.active
+            drop := bar_index - math.max(L.sweptBar, L.pendBar, L.bornBar) > 120
+        else if not L.major
+            drop := bar_index - L.bornBar > minorLook
+        else if L.name == "EQH" or L.name == "EQL"
+            drop := bar_index - L.bornBar > gapMaxAge
+        if drop
+            f_delLevel(L)
+            levels.remove(i)
+        else
+            i += 1
+    true
+
+// Session ranges
+var float asiaH = na
+var float asiaL = na
+var float lonH  = na
+var float lonL  = na
+if inAsia
+    if not inAsia[1]
+        asiaH := high
+        asiaL := low
+    else
+        asiaH := math.max(nz(asiaH, high), high)
+        asiaL := math.min(nz(asiaL, low), low)
+if inLondon
+    if not inLondon[1]
+        lonH := high
+        lonL := low
+    else
+        lonH := math.max(nz(lonH, high), high)
+        lonL := math.min(nz(lonL, low), low)
+
+if barstate.isconfirmed
+    // ── daily / weekly reference levels
+    if newDay
+        f_replaceLevel("PDH", pdh, true,  true, false)
+        f_replaceLevel("PDL", pdl, false, true, false)
+        stats.set(0, 0.0)
+        stats.set(1, 0.0)
+        stats.set(2, 0.0)
+        stats.set(4, 0.0)
+        stats.set(6, 0.0)
+    if newWeek
+        f_replaceLevel("PWH", pwh, true,  true, false)
+        f_replaceLevel("PWL", pwl, false, true, false)
+        stats.set(3, 0.0)
+    if not inAsia and inAsia[1]
+        f_replaceLevel("Asia H", asiaH, true,  true, false)
+        f_replaceLevel("Asia L", asiaL, false, true, false)
+    if not inLondon and inLondon[1]
+        f_replaceLevel("London H", lonH, true,  true, false)
+        f_replaceLevel("London L", lonL, false, true, false)
+    if inNY and not inNY[1]
+        f_replaceLevel("NY H", high, true,  true, true)
+        f_replaceLevel("NY L", low,  false, true, true)
+    // ── 5m swings → minor liquidity, equal highs/lows
+    if not na(ph5)
+        prevPH5 := lastPH5
+        lastPH5 := ph5
+        lastPH5Bar := bar_index - pivMinor
+        if not na(prevPH5) and math.abs(ph5 - prevPH5) <= eqTol
+            f_newLevel("EQH", math.max(ph5, prevPH5), true, true, false, pivMinor)
+        else
+            f_newLevel("swing H", ph5, true, false, false, pivMinor)
+    if not na(pl5)
+        prevPL5 := lastPL5
+        lastPL5 := pl5
+        lastPL5Bar := bar_index - pivMinor
+        if not na(prevPL5) and math.abs(pl5 - prevPL5) <= eqTol
+            f_newLevel("EQL", math.min(pl5, prevPL5), false, true, false, pivMinor)
+        else
+            f_newLevel("swing L", pl5, false, false, false, pivMinor)
+    // ── sweeps / breaks
+    f_levelsUpdate()
+    f_levelsPrune()
+    // ── HTF gaps: judge on own TF, then detect new
+    if chgA
+        f_htfClose(gapsA, c1a)
+        f_detectHTF(gapsA, htf1 + "m", 3, h1a, l1a, h2a, l2a, c2a, o2a, h3a, l3a, t2a, v2a, atrA, abA, vsA)
+    if chgB
+        f_htfClose(gapsB, c1b)
+        f_detectHTF(gapsB, htf2 + "m", 2, h1b, l1b, h2b, l2b, c2b, o2b, h3b, l3b, t2b, v2b, atrB, abB, vsB)
+    f_detect5m()
+    f_touch(gapsA)
+    f_touch(gapsB)
+    f_touch(gaps5)
+    f_prune(gapsA, true)
+    f_prune(gapsB, true)
+    f_prune(gaps5, false)
+    f_pruneSide(gapsA, true)
+    f_pruneSide(gapsA, false)
+    f_pruneSide(gapsB, true)
+    f_pruneSide(gapsB, false)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  SETUP ENGINE (one state machine per direction; models A, B, C share it)
+// ─────────────────────────────────────────────────────────────────────────────
+var array<line>   setupLines  = array.new<line>()
+var array<label>  setupLabels = array.new<label>()
+var array<string> txt         = array.new<string>(4, "")   // 0 last setup summary · 1 hard rules · 2 confluences · 3 last event
+
+f_regLine(line ln) =>
+    setupLines.push(ln)
+    if setupLines.size() > 160
+        line.delete(setupLines.shift())
+f_regLabel(label lb) =>
+    setupLabels.push(lb)
+    if setupLabels.size() > 200
+        label.delete(setupLabels.shift())
+f_px(float v) => str.tostring(v, format.mintick)
+f_dirTxt(int dir) => dir == 1 ? "LONG" : "SHORT"
+f_gradeTxt(int g) => g == 3 ? "A+" : g == 2 ? "A" : g == 1 ? "B" : "SKIP"
+
+f_resetSetup(Setup s) =>
+    s.state := 0
+    s.model := ""
+    s.poiId := -1
+    s.poiTf := ""
+    s.poiTop := na
+    s.poiBot := na
+    s.poiState := 0
+    s.poiTouches := 0
+    s.stacked := false
+    s.lastTouchBar := -1
+    s.pendLevel := na
+    s.sweepExt := na
+    s.sweepBar := -1
+    s.strongSweep := false
+    s.sweptMajor := false
+    s.sweptName := ""
+    s.smtOk := false
+    s.mssLevel := na
+    s.mssBar := -1
+    s.mssClose := na
+    s.dispRatio := 0
+    s.volOk := false
+    s.vwapOk := false
+    s.gapTop := na
+    s.gapBot := na
+    s.entry := na
+    s.stop := na
+    s.tp1 := na
+    s.tp2 := na
+    s.r := na
+    s.roomR := 0
+    s.tp1Name := ""
+    s.tp2Name := ""
+    s.grade := 0
+    s.conf := 0
+    s.mult := 0
+    s.contracts := 0
+    s.hardTxt := ""
+    s.confTxt := ""
+    s.reason := ""
+    s.armedBar := -1
+    s.filled := false
+    s.fillBar := -1
+    s.tp1Hit := false
+    s.curStop := na
+    s.realized := 0
+    s.openFrac := 0
+    s
+
+f_makeSetup(int dir) =>
+    Setup s = Setup.new()
+    s.dir := dir
+    f_resetSetup(s)
+    s
+
+var Setup sLong  = f_makeSetup(1)
+var Setup sShort = f_makeSetup(-1)
+var Gap   noGap  = na
+
+f_setPOI(Setup s, Gap g) =>
+    s.poiId := g.id
+    s.poiTf := g.tf
+    s.poiTop := g.top
+    s.poiBot := g.bottom
+    s.poiState := g.state
+    s.poiTouches := g.inside ? g.touches - 1 : g.touches
+    s.stacked := f_stacked(g)
+    s.lastTouchBar := bar_index
+    s
+
+f_poiDead(Setup s, Gap g) => na(g) ? true : s.model == "C" ? g.state == 4 : g.state >= 2
+
+// Best with-bias POI price is touching now (higher TF wins, then nearest CE)
+f_scanPOI(array<Gap> arr, int dir, Gap cur, bool needPD) =>
+    Gap best = cur
+    for g in arr
+        if g.bull == (dir == 1) and g.state <= 1 and g.entries < 2
+            int prior = g.inside ? g.touches - 1 : g.touches
+            bool limbo = dir == 1 ? close < g.bottom : close > g.top
+            bool touched = dir == 1 ? low <= g.top : high >= g.bottom
+            bool pdOk = not needPD or (dir == 1 ? g.ce <= pd50 : g.ce >= pd50)
+            if prior <= 1 and not limbo and touched and pdOk
+                if na(best) or g.rank > best.rank or (g.rank == best.rank and math.abs(g.ce - close) < math.abs(best.ce - close))
+                    best := g
+    best
+
+// First opposing 15m/30m gap edge or major level beyond the entry (the room rule)
+f_firstObstacle(int dir, float entry) =>
+    float best = na
+    string name = ""
+    for g in gapsA
+        if g.bull == (dir == -1) and g.state <= 1
+            float edge = dir == 1 ? g.bottom : g.top
+            if dir * (edge - entry) > 0 and (na(best) or dir * (edge - best) < 0)
+                best := edge
+                name := g.tf + (dir == 1 ? " bear gap" : " bull gap")
+    for g in gapsB
+        if g.bull == (dir == -1) and g.state <= 1
+            float edge = dir == 1 ? g.bottom : g.top
+            if dir * (edge - entry) > 0 and (na(best) or dir * (edge - best) < 0)
+                best := edge
+                name := g.tf + (dir == 1 ? " bear gap" : " bull gap")
+    for L in levels
+        if L.active and L.major and L.isHigh == (dir == 1)
+            if dir * (L.price - entry) > 0 and (na(best) or dir * (L.price - best) < 0)
+                best := L.price
+                name := L.name
+    [best, name]
+
+// Nearest major level beyond a price (draw on liquidity)
+f_nextTarget(int dir, float beyond) =>
+    float best = na
+    string name = ""
+    for L in levels
+        if L.active and L.major and L.isHigh == (dir == 1) and dir * (L.price - beyond) > 0 and (na(best) or dir * (L.price - best) < 0)
+            best := L.price
+            name := L.name
+    [best, name]
+
+f_grade(Setup s, string model) =>
+    int dir = s.dir
+    float riskUsd = riskFixed > 0 ? riskFixed : acctSize * riskPct / 100
+    bool biasOk  = bias == dir or (bias == 0 and allowNeutral and s.sweptMajor)
+    bool poiOk   = model == "C" ? s.poiState == 2 : s.poiState <= 1
+    bool sweepOk = model == "A" ? s.sweepBar >= 0 : true
+    bool mssOk   = model == "A" ? s.mssBar >= 0 : model == "B" ? (mssBarArr.get(f_idx(dir)) >= 0 and bar_index - mssBarArr.get(f_idx(dir)) <= bLegBars) : true
+    bool roomOk  = s.roomR >= minRoomR
+    bool newsOk  = not newsBlock
+    bool windowOk = winClass >= 1
+    float tradesToday = stats.get(0) + manTrades
+    float rToday = stats.get(1) + manR
+    bool limitsOk = calmOK and tradesToday < maxTrades and rToday > dailyStopR and stats.get(2) < maxConsec and stats.get(3) > weeklyStopR and adrUsed < adrDone
+    bool c1 = s.stacked
+    bool c2 = s.sweptMajor
+    bool c3 = f_inDiscount(dir, s.entry)
+    bool c4 = s.volOk
+    bool c5 = s.vwapOk
+    bool c6 = inKZ
+    bool c7 = s.poiTouches == 0
+    bool c8 = smtOn and s.smtOk
+    int conf = (c1 ? 1 : 0) + (c2 ? 1 : 0) + (c3 ? 1 : 0) + (c4 ? 1 : 0) + (c5 ? 1 : 0) + (c6 ? 1 : 0) + (c7 ? 1 : 0) + (c8 ? 1 : 0)
+    bool weakPen = model == "A" and not s.strongSweep
+    if weakPen
+        conf -= 1
+    conf := math.max(conf, 0)
+    int grade = conf >= 4 ? 3 : conf >= 2 ? 2 : 1
+    string why = ""
+    if windowOk and winClass == 2 and grade < 3
+        windowOk := false
+        why := "window is A+ only"
+    if limitsOk and adrUsed >= adrAplus and grade < 3
+        limitsOk := false
+        why := "ADR ≥ " + str.tostring(adrAplus * 100, "#") + "% used: A+ only"
+    if limitsOk and model == "B" and adrUsed >= adrNoB
+        limitsOk := false
+        why := "ADR ≥ " + str.tostring(adrNoB * 100, "#") + "% used: no Setup B"
+    float mult = grade == 3 ? 1.0 : grade == 2 ? 0.5 : allowB ? 0.25 : 0.0
+    bool capHalf = s.poiState == 1 or conflicted or bias == 0
+    if capHalf
+        mult := math.min(mult, 0.5)
+    bool hardOk = biasOk and poiOk and sweepOk and mssOk and roomOk and newsOk and windowOk and limitsOk
+    s.hardTxt := (biasOk ? "✓" : "✗") + " 1 with bias|" + (poiOk ? "✓" : "✗") + " 2 POI valid on own TF|" + (sweepOk ? "✓" : "✗") + " 3 liquidity swept at POI|" + (mssOk ? "✓" : "✗") + " 4 MSS with displacement|" + (roomOk ? "✓" : "✗") + " 5 room " + str.tostring(s.roomR, "#.#") + "R (≥ " + str.tostring(minRoomR, "#.#") + "R)|" + (newsOk and windowOk ? "✓" : "✗") + " 6 news / window|" + (limitsOk ? "✓" : "✗") + " 7 limits & calm"
+    s.confTxt := (c1 ? "✓" : "·") + " 15m+30m stacked|" + (c2 ? "✓" : "·") + " major level swept|" + (c3 ? "✓" : "·") + (dir == 1 ? " entry in discount|" : " entry in premium|") + (c4 ? "✓" : "·") + " displacement volume|" + (c5 ? "✓" : "·") + " VWAP " + (dir == 1 ? "reclaimed|" : "lost|") + (c6 ? "✓" : "·") + " inside kill zone|" + (c7 ? "✓" : "·") + " first touch|" + (c8 ? "✓" : "·") + " SMT (silver)" + (weakPen ? "|−1 weak sweep" : "") + (capHalf ? "|cap ½ risk" : "")
+    s.conf := conf
+    s.grade := hardOk ? grade : 0
+    s.mult := hardOk ? mult : 0
+    s.contracts := hardOk and mult > 0 and s.r > 0 ? int(math.floor(riskUsd * mult / (s.r * ptVal))) : 0
+    s.reason := hardOk ? "" : not biasOk ? "against bias" : not poiOk ? "POI not valid" : not sweepOk ? "no sweep" : not mssOk ? "no fresh MSS" : not roomOk ? "room " + str.tostring(s.roomR, "#.#") + "R < " + str.tostring(minRoomR, "#.#") + "R" : not newsOk ? "news window" : not windowOk ? (why == "" ? "outside trading window" : why) : (why == "" ? "daily/weekly limits" : why)
+    s
+
+f_drawArmed(Setup s) =>
+    int x2 = bar_index + orderExpiry
+    f_regLine(line.new(bar_index, s.entry, x2, s.entry, color = color.new(color.blue, 0), width = 2))
+    f_regLine(line.new(bar_index, s.stop,  x2, s.stop,  color = color.new(cBear, 0), width = 1))
+    f_regLine(line.new(bar_index, s.tp1,   x2, s.tp1,   color = color.new(cBull, 0), width = 1))
+    f_regLine(line.new(bar_index, s.tp2,   x2, s.tp2,   color = color.new(cBull, 30), width = 1, style = line.style_dashed))
+    string t = f_dirTxt(s.dir) + " " + s.model + " · " + f_gradeTxt(s.grade) + " · " + str.tostring(s.contracts) + " ct\n" + "E " + f_px(s.entry) + "  S " + f_px(s.stop) + "  R " + f_px(s.r) + "\nTP1 " + f_px(s.tp1) + " (" + str.tostring(s.roomR, "#.#") + "R · " + s.tp1Name + ")\nTP2 " + f_px(s.tp2) + " (" + s.tp2Name + ")"
+    f_regLabel(label.new(bar_index, s.stop, t, style = s.dir == 1 ? label.style_label_up : label.style_label_down, color = color.new(s.grade == 3 ? cBull : color.blue, 20), textcolor = color.white, size = size.small))
+
+f_drawSkip(Setup s) =>
+    string t = "SKIP " + f_dirTxt(s.dir) + " " + s.model + "\n" + s.reason
+    f_regLabel(label.new(bar_index, s.dir == 1 ? low : high, t, style = s.dir == 1 ? label.style_label_up : label.style_label_down, color = color.new(color.gray, 30), textcolor = color.white, size = size.tiny))
+
+// Arm (or skip) a setup whose entry, reference extreme and 5m gap are already stored
+f_arm(Setup s, Setup other, Gap poi, string model, float swingTarget) =>
+    int dir = s.dir
+    float buffer = math.max(bufPct * atr5, minBufTicks * tick)
+    s.stop := s.sweepExt - dir * buffer
+    s.r := dir * (s.entry - s.stop)
+    float minStop = minStopTicks * tick
+    if s.r < minStop
+        s.stop := s.entry - dir * minStop
+        s.r := minStop
+    [obst, obstName] = f_firstObstacle(dir, s.entry)
+    if not na(swingTarget) and dir * (swingTarget - s.entry) > 0 and (na(obst) or dir * (swingTarget - obst) < 0)
+        obst := swingTarget
+        obstName := "recent swing"
+    float manDOL = dir == 1 ? manDOLup : manDOLdn
+    float dol = manDOL > 0 ? manDOL : na
+    string dolName = manDOL > 0 ? "manual DOL" : ""
+    if not na(obst)
+        s.tp1 := obst - dir * tick
+        s.tp1Name := obstName
+    if na(dol)
+        [nt, ntName] = f_nextTarget(dir, na(s.tp1) ? s.entry : s.tp1)
+        dol := nt
+        dolName := ntName
+    if na(s.tp1)
+        if not na(dol)
+            s.tp1 := dol - dir * tick
+            s.tp1Name := dolName
+        else
+            s.tp1 := s.entry + dir * 3 * s.r
+            s.tp1Name := "3R (no obstacle)"
+    if na(dol) or dir * (dol - s.tp1) <= 0
+        s.tp2 := s.entry + dir * math.max(4 * s.r, dir * (s.tp1 - s.entry) + s.r)
+        s.tp2Name := "no level · R-based"
+    else
+        s.tp2 := dol
+        s.tp2Name := dolName
+    s.roomR := dir * (s.tp1 - s.entry) / s.r
+    s.model := model
+    f_grade(s, model)
+    s.armedBar := bar_index
+    if other.state >= 4 and s.grade > 0
+        s.grade := 0
+        s.mult := 0
+        s.contracts := 0
+        s.reason := "one trade at a time"
+    txt.set(1, s.hardTxt)
+    txt.set(2, s.confTxt)
+    if s.grade >= 1 and s.mult > 0 and s.contracts > 0
+        s.state := 4
+        s.openFrac := 0
+        poi.entries += 1
+        stats.set(4, stats.get(4) + 1)
+        f_drawArmed(s)
+        string summary = f_dirTxt(dir) + " " + model + " " + f_gradeTxt(s.grade) + " · " + str.tostring(s.contracts) + " ct · E " + f_px(s.entry) + " S " + f_px(s.stop) + " TP1 " + f_px(s.tp1) + " (" + str.tostring(s.roomR, "#.#") + "R) TP2 " + f_px(s.tp2)
+        txt.set(0, summary)
+        txt.set(3, "ARMED " + summary)
+        alert("MGC PB: SETUP " + model + " ARMED — " + summary + " · risk $" + str.tostring(s.contracts * s.r * ptVal, "#") + " · " + s.tp1Name + " → " + s.tp2Name, alert.freq_once_per_bar_close)
+    else
+        if s.reason == ""
+            s.reason := s.contracts == 0 and s.mult > 0 ? "stop too wide for risk budget" : s.grade == 1 ? "B grade (0–1 confluences)" : "no size"
+        f_drawSkip(s)
+        stats.set(6, stats.get(6) + 1)
+        lastSkipBar.set(f_idx(dir), bar_index)
+        string summary2 = "SKIP " + f_dirTxt(dir) + " " + model + " — " + s.reason + " · E " + f_px(s.entry) + " S " + f_px(s.stop) + " room " + str.tostring(s.roomR, "#.#") + "R · conf " + str.tostring(s.conf)
+        txt.set(0, summary2)
+        txt.set(3, summary2)
+        alert("MGC PB: " + summary2, alert.freq_once_per_bar_close)
+        s.state := 0
+    s
+
+// Setup A: sweep → MSS → entry gap
+f_runA(Setup s, Setup other) =>
+    int dir = s.dir
+    bool active = bias == dir or (bias == 0 and allowNeutral)
+    // refresh / validate the stored POI
+    Gap poi = na
+    if s.state >= 1 and s.state <= 3 and s.poiId >= 0
+        poi := f_gapById(s.poiId)
+        if na(poi) or poi.state >= 2 or (poi.entries >= 2 and s.state <= 1)
+            if not na(poi) and poi.state == 2
+                f_regLabel(label.new(bar_index, dir == 1 ? poi.bottom : poi.top, "POI failed", style = dir == 1 ? label.style_label_up : label.style_label_down, color = color.new(cIFVG, 30), textcolor = color.white, size = size.tiny))
+            f_resetSetup(s)
+            poi := na
+        else
+            s.poiState := poi.state
+    if not active
+        if s.state >= 1 and s.state <= 3
+            f_resetSetup(s)
+    else
+        // ── location: at a POI?
+        if s.state <= 1
+            Gap candGap = f_scanPOI(gapsA, dir, noGap, reqPD_A)
+            candGap := f_scanPOI(gapsB, dir, candGap, reqPD_A)
+            if not na(candGap)
+                if s.state == 0 or candGap.id != s.poiId
+                    f_resetSetup(s)
+                    f_setPOI(s, candGap)
+                    s.state := 1
+                    poi := candGap
+                    txt.set(3, "AT " + candGap.tf + " POI " + f_px(candGap.bottom) + "–" + f_px(candGap.top))
+                    alert("MGC PB: price at " + candGap.tf + (dir == 1 ? " bullish" : " bearish") + " POI " + f_px(candGap.bottom) + "–" + f_px(candGap.top) + " (" + (candGap.state == 0 ? "respected" : "weakening") + ", touch " + str.tostring(candGap.touches) + ") — wait for sweep + MSS", alert.freq_once_per_bar_close)
+                else
+                    s.lastTouchBar := bar_index
+            else if s.state == 1 and bar_index - s.lastTouchBar > atPoiBars
+                f_resetSetup(s)
+        // ── sweep at / inside the POI
+        if s.state == 1 and not na(poi)
+            float tol = sweepTolAtr * atr5
+            float lo = math.min(poi.bottom, poi.top) - tol
+            float hi = math.max(poi.bottom, poi.top) + tol
+            Level hit = na
+            for L in levels
+                if L.sweptBar == bar_index and L.isHigh == (dir == -1) and L.price >= lo and L.price <= hi
+                    if na(hit) or dir * (L.ext - hit.ext) < 0 or (L.major and not hit.major)
+                        hit := L
+            if not na(hit)
+                s.state := 2
+                s.sweepBar := bar_index
+                s.sweepExt := hit.ext
+                s.pendLevel := hit.price
+                s.strongSweep := hit.strong
+                s.sweptMajor := hit.major
+                s.sweptName := hit.name
+                s.poiTouches := poi.inside ? poi.touches - 1 : poi.touches
+                s.poiState := poi.state
+                s.stacked := f_stacked(poi)
+                if smtOn and not na(smtLow)
+                    s.smtOk := dir == 1 ? (hit.ext < goldLowPrev and smtLow > smtLowPrev) : (hit.ext > goldHighPrev and smtHigh < smtHighPrev)
+                float mssCand = dir == 1 ? lastPH5 : lastPL5
+                s.mssLevel := not na(mssCand) and dir * (mssCand - s.sweepExt) >= mssMinAtr * atr5 ? mssCand : na
+                f_regLabel(label.new(bar_index, hit.ext, "sweep " + hit.name + (hit.strong ? "" : " (weak)"), style = dir == 1 ? label.style_label_up : label.style_label_down, color = color.new(color.orange, 20), textcolor = color.white, size = size.tiny))
+                txt.set(3, "SWEPT " + hit.name + " at " + poi.tf + " POI")
+                alert("MGC PB: SWEEP of " + hit.name + " (" + (hit.strong ? "strong" : "weak") + ") inside " + poi.tf + " POI — wait for displacement MSS " + (dir == 1 ? "above " : "below ") + (na(s.mssLevel) ? "next swing" : f_px(s.mssLevel)), alert.freq_once_per_bar_close)
+        // ── MSS
+        if s.state == 2
+            if bar_index - s.sweepBar > mssWindow
+                txt.set(3, "sweep expired (no MSS within " + str.tostring(mssWindow) + " bars)")
+                s.state := 1
+            else if dir * (close - s.pendLevel) < 0
+                txt.set(3, "sweep negated (closed back through " + s.sweptName + ")")
+                s.state := 1
+            else
+                if dir == 1 ? low < s.sweepExt : high > s.sweepExt
+                    s.sweepExt := dir == 1 ? low : high
+                float mssCand2 = dir == 1 ? lastPH5 : lastPL5
+                if not na(mssCand2) and dir * (mssCand2 - s.sweepExt) >= mssMinAtr * atr5
+                    s.mssLevel := mssCand2
+                [isDisp, ratio] = f_disp(dir)
+                if not na(s.mssLevel) and dir * (close - s.mssLevel) > 0 and isDisp
+                    s.state := 3
+                    s.mssBar := bar_index
+                    s.mssClose := close
+                    s.dispRatio := ratio
+                    s.volOk := volume > volSma
+                    s.vwapOk := dir * (close - sVwap) > 0
+                    mssBarArr.set(f_idx(dir), bar_index)
+                    mssVolArr.set(f_idx(dir), s.volOk)
+                    pullbackArr.set(f_idx(dir), 0)
+                    f_regLabel(label.new(bar_index, dir == 1 ? high : low, "MSS " + str.tostring(ratio, "#.#") + "×", style = dir == 1 ? label.style_label_down : label.style_label_up, color = color.new(dir == 1 ? cBull : cBear, 10), textcolor = color.white, size = size.tiny))
+                    txt.set(3, "MSS " + f_dirTxt(dir) + " (" + str.tostring(ratio, "#.#") + "× body)")
+                    alert("MGC PB: MSS " + f_dirTxt(dir) + " confirmed — displacement " + str.tostring(ratio, "#.#") + "× avg body" + (s.volOk ? ", volume ✓" : "") + ". Waiting for the 5m entry gap.", alert.freq_once_per_bar_close)
+        // ── entry gap left by the displacement
+        if s.state == 3
+            Gap eg = na
+            for g in gaps5
+                if g.bornBar == bar_index and g.bull == (dir == 1) and dir * ((dir == 1 ? g.bottom : g.top) - s.sweepExt) >= 0
+                    eg := g
+            if na(eg) and bar_index - s.mssBar >= entryGapBars
+                // alternate trigger: an inverted 5m gap the displacement closed through
+                for g in gaps5
+                    if g.bull == (dir == -1) and g.bornBar <= s.mssBar and (dir == 1 ? s.mssClose > g.top and g.bottom >= s.sweepExt : s.mssClose < g.bottom and g.top <= s.sweepExt)
+                        if na(eg) or math.abs(g.ce - close) < math.abs(eg.ce - close)
+                            eg := g
+                if na(eg)
+                    txt.set(3, "no 5m entry gap after MSS")
+                    s.state := 1
+            if not na(eg)
+                float h = eg.top - eg.bottom
+                bool tiny = h < math.max(tinyTicks * tick, tinyAtr * atr5)
+                s.entry := tiny ? (dir == 1 ? eg.top : eg.bottom) : eg.ce
+                s.gapTop := eg.top
+                s.gapBot := eg.bottom
+                f_arm(s, other, poi, "A", float(na))
+    s
+
+// Generic MSS tracker (any sweep → displacement close beyond the last 5m swing) so Setup B
+// can fire after impulses that did not come from a Setup A POI
+var array<int>   anySweepBar = array.new<int>(2, -1)
+var array<float> anySweepExt = array.new<float>(2, na)
+f_trackMSS(int dir) =>
+    int idx = f_idx(dir)
+    for L in levels
+        if L.sweptBar == bar_index and L.isHigh == (dir == -1)
+            if anySweepBar.get(idx) != bar_index or dir * (L.ext - anySweepExt.get(idx)) < 0
+                anySweepBar.set(idx, bar_index)
+                anySweepExt.set(idx, L.ext)
+    int sb = anySweepBar.get(idx)
+    if sb >= 0 and bar_index > sb and bar_index - sb <= mssWindow and mssBarArr.get(idx) < sb
+        float lvl = dir == 1 ? lastPH5 : lastPL5
+        if not na(lvl) and dir * (lvl - anySweepExt.get(idx)) >= mssMinAtr * atr5 and dir * (close - lvl) > 0
+            [isDisp, ratio] = f_disp(dir)
+            if isDisp
+                mssBarArr.set(idx, bar_index)
+                mssVolArr.set(idx, volume > volSma)
+                pullbackArr.set(idx, 0)
+    true
+
+// Setup B: first pullback after a fresh MSS into a 5m gap nested in an HTF gap
+f_runB(Setup s, Setup other) =>
+    int dir = s.dir
+    int idx = f_idx(dir)
+    if enableB and s.state <= 1 and other.state < 4 and bias == dir and adrUsed < adrNoB and mssBarArr.get(idx) >= 0 and bar_index - mssBarArr.get(idx) <= bLegBars and pullbackArr.get(idx) == 0
+        bool structOk = dir == 1 ? (not na(prevPH5) and lastPH5 > prevPH5 and not na(prevPL5) and lastPL5 > prevPL5) : (not na(prevPH5) and lastPH5 < prevPH5 and not na(prevPL5) and lastPL5 < prevPL5)
+        bool vwapOk = dir * (close - sVwap) > 0
+        if structOk and vwapOk
+            Gap g5 = na
+            Gap gH = na
+            for g in gaps5
+                if na(gH) and g.bull == (dir == 1) and g.state <= 1 and g.lastTouchBar == bar_index and g.bornBar < bar_index - 1
+                    for h in gapsA
+                        if na(gH) and h.bull == g.bull and h.state <= 1 and h.entries < 2 and h.bottom < g.top and h.top > g.bottom
+                            g5 := g
+                            gH := h
+                    for h in gapsB
+                        if na(gH) and h.bull == g.bull and h.state <= 1 and h.entries < 2 and h.bottom < g.top and h.top > g.bottom
+                            g5 := g
+                            gH := h
+            if not na(gH)
+                pullbackArr.set(idx, 1)
+                float oTop = math.min(g5.top, gH.top)
+                float oBot = math.max(g5.bottom, gH.bottom)
+                float oCe = (oTop + oBot) / 2
+                bool tiny = (oTop - oBot) < math.max(tinyTicks * tick, tinyAtr * atr5)
+                f_resetSetup(s)
+                f_setPOI(s, gH)
+                s.entry := tiny ? (dir == 1 ? oTop : oBot) : oCe
+                s.sweepExt := dir == 1 ? oBot : oTop
+                s.gapTop := g5.top
+                s.gapBot := g5.bottom
+                s.volOk := mssVolArr.get(idx)
+                s.vwapOk := true
+                s.strongSweep := true
+                s.mssBar := mssBarArr.get(idx)
+                for L in levels
+                    if L.sweptBar == bar_index and L.isHigh == (dir == -1)
+                        s.sweptMajor := s.sweptMajor or L.major
+                        s.sweptName := L.name
+                        s.sweepBar := bar_index
+                txt.set(3, "Setup B pullback into " + gH.tf + " nested gap")
+                f_arm(s, other, gH, "B", dir == 1 ? lastPH5 : lastPL5)
+    s
+
+// Setup C: first retest of a flipped (failed) HTF gap that now agrees with bias
+f_runC(Setup s, Setup other) =>
+    int dir = s.dir
+    if enableC and s.state <= 1 and other.state < 4 and bias == dir
+        Gap best = na
+        for g in gapsA
+            if g.state == 2 and g.bull == (dir == -1) and g.lastTouchBar == bar_index and g.retests == 1 and g.entries < 1 and bar_index - g.failedBar <= ifvgLife and (dir == 1 ? close > g.ce : close < g.ce)
+                best := g
+        if na(best)
+            for g in gapsB
+                if g.state == 2 and g.bull == (dir == -1) and g.lastTouchBar == bar_index and g.retests == 1 and g.entries < 1 and bar_index - g.failedBar <= ifvgLife and (dir == 1 ? close > g.ce : close < g.ce)
+                    best := g
+        if not na(best)
+            f_resetSetup(s)
+            f_setPOI(s, best)
+            s.poiTouches := 0
+            s.entry := best.ce
+            s.sweepExt := dir == 1 ? best.bottom : best.top
+            s.gapTop := best.top
+            s.gapBot := best.bottom
+            s.volOk := volume > volSma
+            s.vwapOk := dir * (close - sVwap) > 0
+            s.strongSweep := true
+            for L in levels
+                if L.sweptBar == bar_index and L.isHigh == (dir == -1)
+                    s.sweptMajor := s.sweptMajor or L.major
+                    s.sweptName := L.name
+                    s.sweepBar := bar_index
+            txt.set(3, "Setup C retest of flipped " + best.tf + " gap")
+            f_arm(s, other, best, "C", float(na))
+    s
+
+f_closeTrade(Setup s, string how) =>
+    float res = s.realized
+    stats.set(0, stats.get(0) + 1)
+    stats.set(1, stats.get(1) + res)
+    stats.set(3, stats.get(3) + res)
+    stats.set(2, res < 0 ? stats.get(2) + 1 : 0)
+    stats.set(5, res)
+    string t = (res >= 0 ? "+" : "") + str.tostring(res, "#.##") + "R · " + how
+    f_regLabel(label.new(bar_index, s.dir == 1 ? high : low, t, style = s.dir == 1 ? label.style_label_down : label.style_label_up, color = color.new(res >= 0 ? cBull : cBear, 15), textcolor = color.white, size = size.small))
+    txt.set(3, "CLOSED " + t)
+    alert("MGC PB: trade closed " + t + " · today " + str.tostring(stats.get(0), "#") + " trades, " + str.tostring(stats.get(1), "#.##") + "R", alert.freq_once_per_bar_close)
+    float tradesToday = stats.get(0) + manTrades
+    float rToday = stats.get(1) + manR
+    if rToday <= dailyStopR or stats.get(2) >= maxConsec or tradesToday >= maxTrades
+        alert("MGC PB: DAILY STOP — " + (rToday <= dailyStopR ? "R limit" : stats.get(2) >= maxConsec ? "consecutive losses" : "trade count") + ". Close the platform.", alert.freq_once_per_bar_close)
+    f_resetSetup(s)
+
+// Management: armed order → fill → ladder at TP1 → runner / stop / time stop / POI failure
+f_manage(Setup s) =>
+    int dir = s.dir
+    if s.state == 4
+        bool fill = dir == 1 ? low <= s.entry : high >= s.entry
+        bool tp1First = dir == 1 ? high >= s.tp1 : low <= s.tp1
+        bool gapFail = dir == 1 ? close < s.gapBot : close > s.gapTop
+        if fill
+            s.filled := true
+            s.fillBar := bar_index
+            s.state := 5
+            s.openFrac := 1.0
+            s.curStop := s.stop
+            txt.set(3, "FILLED " + f_dirTxt(dir) + " " + s.model + " at " + f_px(s.entry))
+            alert("MGC PB: order filled " + f_dirTxt(dir) + " " + f_px(s.entry) + " · stop " + f_px(s.stop) + " · leave the stop alone until TP1", alert.freq_once_per_bar_close)
+            if dir == 1 ? low <= s.stop : high >= s.stop
+                s.realized := -1.0
+                f_closeTrade(s, "stopped on entry bar")
+        else
+            string why = tp1First ? "TP1 reached before fill" : gapFail ? "5m body closed through entry gap" : bar_index - s.armedBar >= orderExpiry ? "order expired" : winClass == 0 ? "window ended" : ""
+            if why != ""
+                f_regLabel(label.new(bar_index, s.entry, "cancel · " + why, style = label.style_label_left, color = color.new(color.gray, 40), textcolor = color.white, size = size.tiny))
+                txt.set(3, "CANCELLED · " + why)
+                alert("MGC PB: order cancelled — " + why, alert.freq_once_per_bar_close)
+                f_resetSetup(s)
+    if s.state == 5
+        bool stopHit = dir == 1 ? low <= s.curStop : high >= s.curStop
+        bool tp1 = dir == 1 ? high >= s.tp1 : low <= s.tp1
+        bool tp2 = dir == 1 ? high >= s.tp2 : low <= s.tp2
+        if stopHit
+            s.realized += dir * (s.curStop - s.entry) / s.r * s.openFrac
+            f_closeTrade(s, s.tp1Hit ? "runner stopped" : "stopped")
+        else
+            if tp1 and not s.tp1Hit
+                s.tp1Hit := true
+                float frac = s.contracts == 1 ? 1.0 : s.contracts == 2 ? 0.5 : 1.0 / 3.0
+                s.realized += s.roomR * frac
+                s.openFrac -= frac
+                s.curStop := s.entry
+                txt.set(3, "TP1 hit · stop to BE")
+                alert("MGC PB: TP1 hit (" + str.tostring(s.roomR, "#.#") + "R) — ladder off, stop to breakeven", alert.freq_once_per_bar_close)
+                if s.openFrac <= 0.001
+                    f_closeTrade(s, "TP1 (all)")
+            if s.state == 5 and s.tp1Hit and tp2
+                s.realized += dir * (s.tp2 - s.entry) / s.r * s.openFrac
+                f_closeTrade(s, "TP2")
+            if s.state == 5
+                Gap poi = f_gapById(s.poiId)
+                bool poiDead = not na(poi) and f_poiDead(s, poi)
+                bool timeStop = not s.tp1Hit and winClass == 0 and bar_index - s.fillBar >= timeStopBars
+                bool newsExit = not s.tp1Hit and inNews and s.grade < 3
+                if poiDead or timeStop or newsExit
+                    s.realized += dir * (close - s.entry) / s.r * s.openFrac
+                    f_closeTrade(s, poiDead ? "POI failed" : timeStop ? "time stop" : "news window")
+                else if trailRunner and s.tp1Hit
+                    float piv = dir == 1 ? pl5 : ph5
+                    if not na(piv)
+                        float ns = dir == 1 ? math.min(piv - tick, close - atr5) : math.max(piv + tick, close + atr5)
+                        if dir * (ns - s.curStop) > 0
+                            s.curStop := ns
+    s
+
+if barstate.isconfirmed
+    f_manage(sLong)
+    f_manage(sShort)
+    f_runA(sLong, sShort)
+    f_runA(sShort, sLong)
+    f_trackMSS(1)
+    f_trackMSS(-1)
+    f_runB(sLong, sShort)
+    f_runB(sShort, sLong)
+    f_runC(sLong, sShort)
+    f_runC(sShort, sLong)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  VISUALS
+// ─────────────────────────────────────────────────────────────────────────────
+plot(showVWAP ? sVwap : na, "Session VWAP", color = color.new(color.orange, 0), linewidth = 1)
+plot(showRange ? pd50 : na, "Dealing range 50%", color = color.new(color.purple, 15), style = plot.style_linebr, linewidth = 1)
+plot(showRange ? rangeTop : na, "Dealing range top", color = color.new(color.purple, 65), style = plot.style_linebr)
+plot(showRange ? rangeBot : na, "Dealing range bottom", color = color.new(color.purple, 65), style = plot.style_linebr)
+
+bgc = not showKZ ? na : newsBlock ? color.new(color.red, 88) : inLKZ ? color.new(color.blue, 93) : inNYKZ ? color.new(color.teal, 92) : inLunch ? color.new(color.gray, 92) : inPM ? color.new(color.yellow, 95) : na
+bgcolor(bgc)
+plotshape(showLBMA and nyMin == 330, "LBMA AM fix", shape.diamond, location.top, color.new(color.orange, 30), text = "AM fix", textcolor = color.new(color.orange, 20), size = size.tiny)
+plotshape(showLBMA and nyMin == 600, "LBMA PM fix", shape.diamond, location.top, color.new(color.orange, 0), text = "PM fix", textcolor = color.new(color.orange, 0), size = size.tiny)
+plotshape(showLBMA and nyMin == 810, "COMEX settlement", shape.square, location.top, color.new(color.gray, 30), text = "settle", textcolor = color.new(color.gray, 0), size = size.tiny)
+
+// Gap labels (refreshed on the last bar so the POI / obstacle role follows the current bias)
+f_gapLabelTxt(Gap g) =>
+    bool limbo = g.bull ? close < g.bottom : close > g.top
+    string role = g.state == 2 ? "IFVG" : g.state == 3 ? "USED" : limbo ? "LIMBO (wait for " + g.tf + " close)" : bias == 0 ? (g.bull ? "bull zone" : "bear zone") : ((g.bull and bias == 1) or (not g.bull and bias == -1)) ? "POI" : "OBSTACLE"
+    string st = g.state == 1 ? " · weakening" : g.state == 0 ? " · respected" : ""
+    string stars = g.quality >= 3 ? "★★★" : g.quality == 2 ? "★★" : "★"
+    string pd = g.bull ? (g.ce <= pd50 ? " · discount" : " · premium") : (g.ce >= pd50 ? " · premium" : " · discount")
+    g.tf + " " + role + " " + stars + st + " · touches " + str.tostring(g.touches) + (f_stacked(g) ? " · STACKED" : "") + pd
+
+f_updateLabels(array<Gap> arr) =>
+    for g in arr
+        if not na(g.lb)
+            label.set_x(g.lb, bar_index + 2)
+            label.set_y(g.lb, g.ce)
+            label.set_text(g.lb, f_gapLabelTxt(g))
+
+// Kill-zone / news alerts
+if barstate.isconfirmed
+    if inLKZ and not inLKZ[1]
+        alert("MGC PB: London kill zone open (2:00–5:00 ET)", alert.freq_once_per_bar_close)
+    if inNYKZ and not inNYKZ[1]
+        alert("MGC PB: NY AM kill zone open (8:30–11:00 ET)", alert.freq_once_per_bar_close)
+    if inNYKZ[1] and not inNYKZ
+        alert("MGC PB: NY AM kill zone closed — no new trades unless A+", alert.freq_once_per_bar_close)
+    if newsBlock and not newsBlock[1]
+        alert("MGC PB: news window — no entries for " + str.tostring(newsHalf) + " min either side", alert.freq_once_per_bar_close)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  DASHBOARD
+// ─────────────────────────────────────────────────────────────────────────────
+f_tblPos() => tblPos == "Top right" ? position.top_right : tblPos == "Top left" ? position.top_left : tblPos == "Bottom right" ? position.bottom_right : position.bottom_left
+f_tblSize() => tblSize == "tiny" ? size.tiny : tblSize == "small" ? size.small : size.normal
+var table tbl = table.new(f_tblPos(), 2, 40, bgcolor = color.new(color.black, 78), border_width = 1, border_color = color.new(color.gray, 75))
+cDim  = color.new(color.gray, 15)
+cTxt  = color.new(color.white, 0)
+cGood = color.new(cBull, 0)
+cBad  = color.new(cBear, 0)
+cWarn = color.new(color.orange, 0)
+
+f_row(int r, string k, string v, color vc) =>
+    table.cell(tbl, 0, r, k, text_color = cDim, text_halign = text.align_left, text_size = f_tblSize())
+    table.cell(tbl, 1, r, v, text_color = vc, text_halign = text.align_left, text_size = f_tblSize())
+
+f_clock(int ms) =>
+    int secs = math.max(0, int(ms / 1000))
+    str.format("{0,number,00}:{1,number,00}", math.floor(secs / 60.0), secs % 60)
+
+f_stateTxt(Setup s) =>
+    string r = ""
+    switch s.state
+        0 => r := "idle · waiting for price at a POI"
+        1 => r := "AT POI " + s.poiTf + " " + f_px(s.poiBot) + "–" + f_px(s.poiTop) + " · waiting for sweep"
+        2 => r := "SWEPT " + s.sweptName + " · MSS needs close " + (s.dir == 1 ? "> " : "< ") + (na(s.mssLevel) ? "next swing" : f_px(s.mssLevel)) + " with displacement"
+        3 => r := "MSS ✓ · waiting for the 5m entry gap"
+        4 => r := "ARMED " + s.model + " " + f_gradeTxt(s.grade) + " · limit " + f_px(s.entry) + " · stop " + f_px(s.stop) + " · " + str.tostring(s.contracts) + " ct"
+        5 => r := "IN TRADE " + s.model + " · stop " + f_px(s.curStop) + (s.tp1Hit ? " · TP1 done, runner → " + f_px(s.tp2) : " · TP1 " + f_px(s.tp1))
+    r
+
+f_nearestZone(int dir, bool wantPOI) =>
+    // wantPOI: with-dir gaps on the entry side; else opposing gaps on the target side
+    string out = "—"
+    float bestD = na
+    for g in gapsA
+        bool okDir = wantPOI ? g.bull == (dir == 1) : g.bull == (dir == -1)
+        if okDir and g.state <= 1
+            float edge = wantPOI ? (dir == 1 ? g.top : g.bottom) : (dir == 1 ? g.bottom : g.top)
+            float d = math.abs(edge - close)
+            if na(bestD) or d < bestD
+                bestD := d
+                out := g.tf + " " + f_px(g.bottom) + "–" + f_px(g.top) + (g.state == 1 ? " (weak)" : "") + " · " + str.tostring(d, format.mintick) + " away"
+    for g in gapsB
+        bool okDir = wantPOI ? g.bull == (dir == 1) : g.bull == (dir == -1)
+        if okDir and g.state <= 1
+            float edge = wantPOI ? (dir == 1 ? g.top : g.bottom) : (dir == 1 ? g.bottom : g.top)
+            float d = math.abs(edge - close)
+            if na(bestD) or d < bestD
+                bestD := d
+                out := g.tf + " " + f_px(g.bottom) + "–" + f_px(g.top) + (g.state == 1 ? " (weak)" : "") + " · " + str.tostring(d, format.mintick) + " away"
+    out
+
+f_zoneCounts(array<Gap> arr) =>
+    int poi = 0
+    int obs = 0
+    int ifvg = 0
+    for g in arr
+        if g.state <= 1
+            bool withBias = bias == 0 ? true : (g.bull and bias == 1) or (not g.bull and bias == -1)
+            if withBias
+                poi += 1
+            else
+                obs += 1
+        else if g.state == 2
+            ifvg += 1
+    str.tostring(poi) + " POI · " + str.tostring(obs) + " obst · " + str.tostring(ifvg) + " IFVG"
+
+f_nextNews() =>
+    int best = -1
+    for m in array.from(n1, n2, n3)
+        if m >= 0 and m >= nyMin and (best < 0 or m < best)
+            best := m
+    best
+
+if barstate.islast
+    f_updateLabels(gapsA)
+    f_updateLabels(gapsB)
+    if showTable
+        int r = 0
+        table.cell(tbl, 0, r, "MGC PLAYBOOK v2", text_color = cTxt, text_halign = text.align_left, text_size = f_tblSize())
+        table.cell(tbl, 1, r, tfWarn ? "⚠ chart must be 5m (≤ refinement TF)" : "5m timing · " + htf1 + "m/" + htf2 + "m location · " + biasTF + "m/" + bias2TF + "m bias", text_color = tfWarn ? cBad : cDim, text_halign = text.align_left, text_size = f_tblSize())
+        r += 1
+        string bTxt = bias == 1 ? "BULLISH" : bias == -1 ? "BEARISH" : "NEUTRAL · sit out" + (allowNeutral ? " (A+ range extremes, ½ risk)" : "")
+        bTxt += biasMode != "Auto" ? " (manual)" : " · 1H " + (nz(b1Dir) == 1 ? "↑" : nz(b1Dir) == -1 ? "↓" : "→") + " 4H " + (nz(b2Dir) == 1 ? "↑" : nz(b2Dir) == -1 ? "↓" : "→") + (b1Hold ? "" : " · 1H gap lost")
+        bTxt += conflicted ? " · CONFLICTED: ½ risk, TP1 only" : ""
+        f_row(r, "Bias", bTxt, bias == 1 ? cGood : bias == -1 ? cBad : cWarn)
+        r += 1
+        f_row(r, "Dealing range", f_px(rangeBot) + " – " + f_px(rangeTop) + " · 50% " + f_px(pd50) + " · price in " + (close <= pd50 ? "DISCOUNT" : "PREMIUM") + (manRangeTop > 0 ? " (manual)" : ""), cTxt)
+        r += 1
+        [dolUp, dolUpN] = f_nextTarget(1, close)
+        [dolDn, dolDnN] = f_nextTarget(-1, close)
+        f_row(r, "Draw on liquidity", "↑ " + (manDOLup > 0 ? f_px(manDOLup) + " manual" : na(dolUp) ? "none" : dolUpN + " " + f_px(dolUp)) + "   ↓ " + (manDOLdn > 0 ? f_px(manDOLdn) + " manual" : na(dolDn) ? "none" : dolDnN + " " + f_px(dolDn)), cTxt)
+        r += 1
+        f_row(r, "Window", f_windowName() + (kzTail ? " · last " + str.tostring(kzTailMin) + " min (A+ only)" : "") + (winClass == 1 ? " · TRADEABLE" : winClass == 2 ? " · A+ ONLY" : " · NO NEW TRADES"), winClass == 1 ? cGood : winClass == 2 ? cWarn : cBad)
+        r += 1
+        int nn = f_nextNews()
+        f_row(r, "News", (newsBlock ? "BLOCKED" : "clear") + (nn >= 0 ? " · next " + f_fmtMin(nn) + " ET" : " · none left today") + (fomcDay ? " · FOMC day" : ""), newsBlock ? cBad : cTxt)
+        r += 1
+        f_row(r, "HTF closes", barstate.isrealtime ? htf1 + "m in " + f_clock(time_close(htf1) - timenow) + " · " + htf2 + "m in " + f_clock(time_close(htf2) - timenow) : "— (live bars only)", cTxt)
+        r += 1
+        f_row(r, "ATR · ADR", "5m ATR " + f_px(atr5) + " · ADR " + f_px(adr) + " · used " + str.tostring(adrUsed * 100, "#") + "%" + (adrUsed >= adrDone ? " · DONE" : adrUsed >= adrAplus ? " · A only, A+" : adrUsed >= adrNoB ? " · no Setup B" : ""), adrUsed >= adrAplus ? cWarn : cTxt)
+        r += 1
+        f_row(r, "VWAP", f_px(sVwap) + " · price " + (close > sVwap ? "above" : "below"), close > sVwap ? cGood : cBad)
+        r += 1
+        f_row(r, htf1 + "m zones", f_zoneCounts(gapsA), cTxt)
+        r += 1
+        f_row(r, htf2 + "m zones", f_zoneCounts(gapsB), cTxt)
+        r += 1
+        int dDir = bias == 0 ? 1 : bias
+        f_row(r, "Nearest POI", bias == 0 ? "bull " + f_nearestZone(1, true) + " · bear " + f_nearestZone(-1, true) : f_nearestZone(dDir, true), cTxt)
+        r += 1
+        f_row(r, "Nearest obstacle", bias == 0 ? "—" : f_nearestZone(dDir, false), cTxt)
+        r += 1
+        f_row(r, "Long machine", f_stateTxt(sLong), sLong.state >= 4 ? cGood : sLong.state >= 2 ? cWarn : cDim)
+        r += 1
+        f_row(r, "Short machine", f_stateTxt(sShort), sShort.state >= 4 ? cGood : sShort.state >= 2 ? cWarn : cDim)
+        r += 1
+        f_row(r, "Last event", txt.get(3), cTxt)
+        r += 1
+        f_row(r, "Last setup", txt.get(0) == "" ? "—" : txt.get(0), cTxt)
+        r += 1
+        float tradesToday = stats.get(0) + manTrades
+        float rToday = stats.get(1) + manR
+        bool dayStop = rToday <= dailyStopR or stats.get(2) >= maxConsec or tradesToday >= maxTrades or adrUsed >= adrDone
+        f_row(r, "Today", str.tostring(tradesToday, "#") + "/" + str.tostring(maxTrades) + " trades · " + (rToday >= 0 ? "+" : "") + str.tostring(rToday, "#.##") + "R · streak " + str.tostring(stats.get(2), "#") + "L · skips " + str.tostring(stats.get(6), "#") + (dayStop ? " · STOP FOR THE DAY" : ""), dayStop ? cBad : rToday >= 0 ? cGood : cWarn)
+        r += 1
+        f_row(r, "Week", (stats.get(3) >= 0 ? "+" : "") + str.tostring(stats.get(3), "#.##") + "R" + (stats.get(3) <= weeklyStopR ? " · WEEKLY STOP — review first" : ""), stats.get(3) <= weeklyStopR ? cBad : cTxt)
+        r += 1
+        f_row(r, "Risk", "$" + str.tostring(riskFixed > 0 ? riskFixed : acctSize * riskPct / 100, "#") + " per trade · " + str.tostring(ptVal, "#") + " $/pt · " + f_px(tick) + " tick", cDim)
+        r += 1
+        if showCheck and txt.get(1) != ""
+            table.cell(tbl, 0, r, "HARD RULES", text_color = cTxt, text_halign = text.align_left, text_size = f_tblSize())
+            table.cell(tbl, 1, r, "last evaluated setup", text_color = cDim, text_halign = text.align_left, text_size = f_tblSize())
+            r += 1
+            array<string> hr = str.split(txt.get(1), "|")
+            for item in hr
+                f_row(r, "", item, str.startswith(item, "✓") ? cGood : cBad)
+                r += 1
+            table.cell(tbl, 0, r, "CONFLUENCES", text_color = cTxt, text_halign = text.align_left, text_size = f_tblSize())
+            table.cell(tbl, 1, r, "+1 each · A+ ≥ 4 · A 2–3 · B 0–1", text_color = cDim, text_halign = text.align_left, text_size = f_tblSize())
+            r += 1
+            array<string> cf = str.split(txt.get(2), "|")
+            for item in cf
+                f_row(r, "", item, str.startswith(item, "✓") ? cGood : str.startswith(item, "·") ? cDim : cWarn)
+                r += 1
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  STATIC ALERT CONDITIONS (dynamic alert() messages fire via "Any alert() function call")
+// ─────────────────────────────────────────────────────────────────────────────
+armedNow = (sLong.state == 4 and sLong.armedBar == bar_index) or (sShort.state == 4 and sShort.armedBar == bar_index)
+sweptNow = (sLong.state == 2 and sLong.sweepBar == bar_index) or (sShort.state == 2 and sShort.sweepBar == bar_index)
+mssNow   = (sLong.state == 3 and sLong.mssBar == bar_index) or (sShort.state == 3 and sShort.mssBar == bar_index)
+skipNow  = lastSkipBar.get(0) == bar_index or lastSkipBar.get(1) == bar_index
+atPoiNow = (sLong.state == 1 and sLong.lastTouchBar == bar_index) or (sShort.state == 1 and sShort.lastTouchBar == bar_index)
+alertcondition(armedNow, "Setup armed",        "MGC Playbook: a setup is armed — read the dashboard checklist before placing the order")
+alertcondition(sweptNow, "Sweep at POI",       "MGC Playbook: liquidity swept inside a POI — wait for the displacement MSS")
+alertcondition(mssNow,   "MSS confirmed",      "MGC Playbook: market structure shift with displacement — wait for the 5m entry gap")
+alertcondition(skipNow,  "Setup skipped",      "MGC Playbook: a setup was skipped — see the reason on the chart")
+alertcondition(atPoiNow, "Price at POI",       "MGC Playbook: price is at a with-bias 15m/30m POI")
